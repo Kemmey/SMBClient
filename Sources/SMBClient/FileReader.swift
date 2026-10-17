@@ -23,6 +23,8 @@ public class FileReader {
   }
 
   public func read(offset: UInt64, length: UInt32) async throws -> Data {
+    // RUMSKROT-HARDEN: nothing to read is not a stalled read.
+    guard length > 0 else { return Data() }
     let readSize = min(length, session.maxReadSize)
     let fileProxy = try await fileProxy()
 
@@ -36,6 +38,7 @@ public class FileReader {
         length: min(readSize, length - UInt32(truncatingIfNeeded: buffer.count))
       )
 
+      try requireProgress(response)
       buffer.append(response.buffer)
     } while NTStatus(response.header.status) != .endOfFile && buffer.count < length && offset + UInt64(buffer.count) < fileProxy.size
 
@@ -55,9 +58,10 @@ public class FileReader {
         offset: offset
       )
 
+      try requireProgress(response)
       buffer.append(response.buffer)
       offset = UInt64(buffer.count)
-      progressHandler(Double(offset) / Double(fileProxy.size))
+      progressHandler(fraction(offset, of: fileProxy.size))
     } while NTStatus(response.header.status) != .endOfFile && buffer.count < fileProxy.size
 
     progressHandler(1.0)
@@ -101,11 +105,12 @@ public class FileReader {
         offset: offset
       )
 
+      try requireProgress(response)
       fileHandle.seekToEndOfFile()
       fileHandle.write(response.buffer)
       offset += UInt64(response.buffer.count)
 
-      let progress = Double(offset) / Double(fileProxy.size)
+      let progress = fraction(offset, of: fileProxy.size)
       progressHandler(progress)
     } while NTStatus(response.header.status) != .endOfFile && offset < fileProxy.size
 
@@ -135,4 +140,17 @@ public class FileReader {
 
     return FileProxy(id: createResponse.fileId, size: createResponse.endOfFile)
   }
+}
+
+// RUMSKROT-HARDEN: a successful READ that returns no bytes before the end
+// of the file would otherwise repeat forever.
+private func requireProgress(_ response: Read.Response) throws {
+  guard response.buffer.isEmpty, NTStatus(response.header.status) != .endOfFile else { return }
+  throw ResponseDecodingError.invalidValue(field: "Read.dataLength", value: 0)
+}
+
+// RUMSKROT-HARDEN: an empty file is complete, not 0/0 = NaN.
+private func fraction(_ done: UInt64, of total: UInt64) -> Double {
+  guard total > 0 else { return 1.0 }
+  return min(1.0, Double(done) / Double(total))
 }
