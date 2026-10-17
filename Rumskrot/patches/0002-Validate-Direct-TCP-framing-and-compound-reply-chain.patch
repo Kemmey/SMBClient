@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kim Hansen <github@kimhansen.dk>
+Date: Sat, 17 Oct 2026 15:16:07 +0200
+Subject: [PATCH] Validate Direct TCP framing and compound reply chains
+
+A frame's 24-bit length must be at least one SMB2 header and fit in 24
+bits; a chained reply's NextCommand must point past the header it
+follows; a compound send must get back exactly as many replies as it
+sent requests. The receive loop appends a frame once however many
+chained replies it holds, so a server-chosen chain cannot multiply
+memory.
+
+RUMSKROT-HARDEN 2/5
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013Swhv8UXni3MZr9Kcar7wJ
+---
+ Sources/SMBClient/Connection.swift | 23 ++++++++++++++++++++++-
+ Sources/SMBClient/Session.swift    |  9 +++++++--
+ 2 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/Sources/SMBClient/Connection.swift b/Sources/SMBClient/Connection.swift
+index 4007757..b595e95 100644
+--- a/Sources/SMBClient/Connection.swift
++++ b/Sources/SMBClient/Connection.swift
+@@ -162,6 +162,9 @@ public class Connection {
+         let transportPacket: DirectTCPPacket
+         do {
+           transportPacket = try DirectTCPPacket(response: self.buffer)
++          // RUMSKROT-HARDEN: a Direct TCP length is 24 bits and an SMB2
++          // message is at least its 64-byte header.
++          try validateFrameLength(transportPacket.protocolLength)
+         } catch {
+           completion(.failure(error))
+           return
+@@ -180,6 +183,9 @@ public class Connection {
+ 
+             var header: Header
+             var response = Data()
++            // RUMSKROT-HARDEN: append the frame once, however many chained
++            // replies it holds; a server-chosen chain cannot multiply memory.
++            var appendedFrame = false
+             do {
+             repeat {
+               header = try reader.read()
+@@ -190,10 +196,14 @@ public class Connection {
+                 .moreProcessingRequired,
+                 .noMoreFiles,
+                 .endOfFile:
+-                response += data
++                if !appendedFrame {
++                  response += data
++                  appendedFrame = true
++                }
+               case .pending:
+                 if self.buffer.count >= 4 {
+                   let transportPacket = try DirectTCPPacket(response: self.buffer)
++                  try validateFrameLength(transportPacket.protocolLength)
+                   let length = Int(transportPacket.protocolLength)
+ 
+                   if self.buffer.count < 4 + length {
+@@ -228,6 +238,10 @@ public class Connection {
+                 return
+               }
+ 
++              // RUMSKROT-HARDEN: a chained reply starts past this header.
++              guard header.nextCommand == 0 || header.nextCommand >= 64 else {
++                throw ResponseDecodingError.invalidValue(field: "Header.nextCommand", value: UInt64(header.nextCommand))
++              }
+               offset += Int(header.nextCommand)
+               reader.seek(to: offset)
+             } while header.nextCommand > 0
+@@ -275,6 +289,13 @@ public class Connection {
+   }
+ }
+ 
++// RUMSKROT-HARDEN
++private func validateFrameLength(_ length: UInt32) throws {
++  guard length >= 64, length <= 0x00FF_FFFF else {
++    throw ResponseDecodingError.invalidValue(field: "DirectTCPPacket.length", value: UInt64(length))
++  }
++}
++
+ public enum ConnectionError: Error {
+   case disconnected
+   case cancelled
+diff --git a/Sources/SMBClient/Session.swift b/Sources/SMBClient/Session.swift
+index e4413c8..a6fa156 100644
+--- a/Sources/SMBClient/Session.swift
++++ b/Sources/SMBClient/Session.swift
+@@ -737,12 +737,17 @@ public class Session {
+ 
+       header = try reader.read()
+ 
++      // RUMSKROT-HARDEN: a chained reply must start past this header, and
++      // a server cannot answer more requests than were sent.
++      guard header.nextCommand == 0 || header.nextCommand >= 64, responses.count <= count else {
++        throw ResponseDecodingError.invalidValue(field: "Header.nextCommand", value: UInt64(header.nextCommand))
++      }
+       offset += Int(header.nextCommand)
+       reader.seek(to: offset)
+     } while header.nextCommand != 0
+ 
+-    // RUMSKROT-HARDEN: a missing reply is an error, not an index trap.
+-    guard responses.count >= count else {
++    // RUMSKROT-HARDEN: nor fewer.
++    guard responses.count == count else {
+       throw ResponseDecodingError.missingResponse(expected: count, received: responses.count)
+     }
+ 

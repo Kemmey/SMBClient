@@ -1,0 +1,828 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kim Hansen <github@kimhansen.dk>
+Date: Sat, 17 Oct 2026 15:34:51 +0200
+Subject: [PATCH] Tests: no reply a server can send traps the client
+
+ResponseFuzzTests builds a well-formed reply for every response parser
+(SMB2 commands, NTLM challenge, DCERPC/NetShareEnum, file and
+file-system information classes, Direct TCP framing), then decodes every
+truncation of it and 2,000 seeded corruptions per parser; each must
+decode or throw ResponseDecodingError. MalformedServerTests runs the
+same guarantee end to end against a scripted localhost server: short,
+oversized and truncated frames, zero negotiated sizes, a compound reply
+missing a part, a NextCommand inside the header, an over-long READ, a
+READ that never advances, and 300 corrupted compound replies over the
+wire. Neither suite needs the Samba container.
+
+RUMSKROT-TESTS
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013Swhv8UXni3MZr9Kcar7wJ
+---
+ .../Hardening/MalformedServerTests.swift      | 213 ++++++++++
+ .../Hardening/ResponseFixtures.swift          | 374 ++++++++++++++++++
+ .../Hardening/ResponseFuzzTests.swift         | 194 +++++++++
+ 3 files changed, 781 insertions(+)
+ create mode 100644 Tests/SMBClientTests/Hardening/MalformedServerTests.swift
+ create mode 100644 Tests/SMBClientTests/Hardening/ResponseFixtures.swift
+ create mode 100644 Tests/SMBClientTests/Hardening/ResponseFuzzTests.swift
+
+diff --git a/Tests/SMBClientTests/Hardening/MalformedServerTests.swift b/Tests/SMBClientTests/Hardening/MalformedServerTests.swift
+new file mode 100644
+index 0000000..070c345
+--- /dev/null
++++ b/Tests/SMBClientTests/Hardening/MalformedServerTests.swift
+@@ -0,0 +1,213 @@
++import XCTest
++import Network
++@testable import SMBClient
++
++// RUMSKROT-TESTS: the same guarantee end to end. A scripted server on
++// localhost answers each request with the next canned reply — framing
++// included, so the framing itself can be broken — and then closes. Every
++// malformed reply must surface as a thrown error, never a trap or a hang.
++final class MalformedServerTests: XCTestCase {
++  func testShortFrameIsRefused() async throws {
++    let session = try await connect(replies: [ResponseFixtures.frame(Data(count: 10))])
++    await assertDecodingError { try await session.negotiate() }
++  }
++
++  func testFrameLengthBeyondTwentyFourBitsIsRefused() async throws {
++    let raw = Data([0x01, 0x00, 0x00, 0x40]) + ResponseFixtures.negotiate().prefix(64)
++    let session = try await connect(replies: [raw])
++    await assertDecodingError { try await session.negotiate() }
++  }
++
++  func testTruncatedNegotiateBodyIsRefused() async throws {
++    let session = try await connect(replies: [ResponseFixtures.frame(ResponseFixtures.negotiate().prefix(70))])
++    await assertDecodingError { try await session.negotiate() }
++  }
++
++  func testZeroNegotiatedReadSizeIsRefused() async throws {
++    let session = try await connect(replies: [ResponseFixtures.frame(ResponseFixtures.negotiate(maxReadSize: 0))])
++    await assertDecodingError { try await session.negotiate() }
++  }
++
++  func testCompoundReplyMissingAPartIsRefused() async throws {
++    let session = try await connect(replies: [
++      ResponseFixtures.frame(ResponseFixtures.negotiate()),
++      ResponseFixtures.frame(ResponseFixtures.create(contexts: Data())),
++    ])
++    try await session.negotiate()
++    await assertDecodingError { _ = try await session.fileStat(path: "file.txt") }
++  }
++
++  func testNextCommandInsideTheHeaderIsRefused() async throws {
++    var compound = ResponseFixtures.compoundCreateClose()
++    compound.replaceSubrange(20..<24, with: Data(from: UInt32(8)))
++    let session = try await connect(replies: [
++      ResponseFixtures.frame(ResponseFixtures.negotiate()),
++      ResponseFixtures.frame(compound),
++    ])
++    try await session.negotiate()
++    await assertDecodingError { _ = try await session.fileStat(path: "file.txt") }
++  }
++
++  func testWellFormedCompoundReplyStillDecodes() async throws {
++    let session = try await connect(replies: [
++      ResponseFixtures.frame(ResponseFixtures.negotiate()),
++      ResponseFixtures.frame(ResponseFixtures.compoundCreateClose()),
++    ])
++    try await session.negotiate()
++    let stat = try await session.fileStat(path: "file.txt")
++    XCTAssertEqual(stat.endOfFile, 1234)
++  }
++
++  func testReadLongerThanRequestedIsRefused() async throws {
++    let session = try await connect(replies: [
++      ResponseFixtures.frame(ResponseFixtures.negotiate()),
++      ResponseFixtures.frame(ResponseFixtures.read(payload: Data(count: 64))),
++    ])
++    try await session.negotiate()
++    await assertDecodingError {
++      _ = try await session.read(fileId: Data(count: 16), offset: 0, length: 16)
++    }
++  }
++
++  func testReadThatMakesNoProgressEndsTheTransfer() async throws {
++    let session = try await connect(replies: [
++      ResponseFixtures.frame(ResponseFixtures.negotiate()),
++      ResponseFixtures.frame(ResponseFixtures.create(contexts: Data())),
++      ResponseFixtures.frame(ResponseFixtures.read(payload: Data())),
++    ])
++    try await session.negotiate()
++    let reader = FileReader(session: session, path: "file.txt")
++    await assertDecodingError { _ = try await reader.read(offset: 0, length: 100) }
++  }
++
++  func testCorruptedRepliesOverTheWireNeverTrap() async throws {
++    var rng = SplitMix64(seed: 0xF022)
++    let compound = ResponseFixtures.compoundCreateClose()
++    for iteration in 0..<300 {
++      var message = [UInt8](compound)
++      for _ in 0..<(1 + Int(rng.next() % 6)) {
++        message[Int(rng.next() % UInt64(message.count))] = UInt8(truncatingIfNeeded: rng.next())
++      }
++      var reply = ResponseFixtures.frame(Data(message))
++      if iteration % 10 == 0 {
++        // Break the framing too, now and then.
++        reply[Int(rng.next() % 4)] = UInt8(truncatingIfNeeded: rng.next())
++      }
++      let session = try await connect(replies: [ResponseFixtures.frame(ResponseFixtures.negotiate()), reply])
++      try await session.negotiate()
++      _ = try? await session.fileStat(path: "file.txt")
++      session.disconnect()
++    }
++  }
++
++  // MARK: - Helpers
++
++  private var servers = [ScriptedServer]()
++
++  override func tearDown() {
++    servers.forEach { $0.stop() }
++    servers.removeAll()
++    super.tearDown()
++  }
++
++  private func connect(replies: [Data]) async throws -> Session {
++    let server = try ScriptedServer(replies: replies)
++    servers.append(server)
++    let port = try await server.start()
++    let session = Session(host: "127.0.0.1", port: port)
++    try await session.connect()
++    return session
++  }
++
++  private func assertDecodingError(
++    file: StaticString = #filePath,
++    line: UInt = #line,
++    _ body: () async throws -> Void
++  ) async {
++    do {
++      try await body()
++      XCTFail("expected a ResponseDecodingError", file: file, line: line)
++    } catch is ResponseDecodingError {
++    } catch {
++      XCTFail("expected a ResponseDecodingError, got \(error)", file: file, line: line)
++    }
++  }
++}
++
++/// Answers each framed request with the next canned reply, then closes.
++final class ScriptedServer: @unchecked Sendable {
++  private let listener: NWListener
++  private let queue = DispatchQueue(label: "ScriptedServer")
++  private var replies: [Data]
++  private var connections = [NWConnection]()
++
++  init(replies: [Data]) throws {
++    self.replies = replies
++    listener = try NWListener(using: .tcp, on: .any)
++  }
++
++  func start() async throws -> Int {
++    listener.newConnectionHandler = { [weak self] connection in
++      guard let self else { return }
++      connections.append(connection)
++      connection.start(queue: queue)
++      serve(connection)
++    }
++    return try await withCheckedThrowingContinuation { continuation in
++      listener.stateUpdateHandler = { [listener] state in
++        switch state {
++        case .ready:
++          listener.stateUpdateHandler = nil
++          continuation.resume(returning: Int(listener.port?.rawValue ?? 0))
++        case .failed(let error):
++          listener.stateUpdateHandler = nil
++          continuation.resume(throwing: error)
++        default:
++          break
++        }
++      }
++      listener.start(queue: queue)
++    }
++  }
++
++  func stop() {
++    queue.sync {
++      connections.forEach { $0.cancel() }
++      listener.cancel()
++    }
++  }
++
++  private func serve(_ connection: NWConnection) {
++    receive(exactly: 4, on: connection) { [weak self] header in
++      guard let self, let header else { return }
++      let length = header.reduce(0) { $0 << 8 | Int($1) } & 0x00FF_FFFF
++      receive(exactly: length, on: connection) { [weak self] body in
++        guard let self, body != nil else { return }
++        guard !replies.isEmpty else {
++          connection.cancel()
++          return
++        }
++        let reply = replies.removeFirst()
++        let isLast = replies.isEmpty
++        connection.send(content: reply, completion: .contentProcessed { _ in
++          // Closing after the last reply turns any reply the client is
++          // still waiting on into a disconnect rather than a hang.
++          if isLast { connection.cancel() }
++        })
++        if !isLast {
++          serve(connection)
++        }
++      }
++    }
++  }
++
++  private func receive(exactly count: Int, on connection: NWConnection, _ completion: @escaping (Data?) -> Void) {
++    guard count > 0 else {
++      completion(Data())
++      return
++    }
++    connection.receive(minimumIncompleteLength: count, maximumLength: count) { data, _, _, error in
++      completion(error == nil ? data : nil)
++    }
++  }
++}
+diff --git a/Tests/SMBClientTests/Hardening/ResponseFixtures.swift b/Tests/SMBClientTests/Hardening/ResponseFixtures.swift
+new file mode 100644
+index 0000000..5a6b746
+--- /dev/null
++++ b/Tests/SMBClientTests/Hardening/ResponseFixtures.swift
+@@ -0,0 +1,374 @@
++import Foundation
++@testable import SMBClient
++
++// RUMSKROT-TESTS: well-formed replies for every response parser, built
++// from the field layouts in MS-SMB2 / MS-NLMP / MS-SRVS. Each one decodes
++// cleanly; the fuzz tests then truncate and corrupt it.
++enum ResponseFixtures {
++  static func header(
++    command: Header.Command,
++    status: UInt32 = 0,
++    nextCommand: UInt32 = 0,
++    messageId: UInt64 = 1
++  ) -> Data {
++    var data = Data()
++    data += UInt32(0x424D53FE)  // ProtocolId
++    data += UInt16(64)          // StructureSize
++    data += UInt16(1)           // CreditCharge
++    data += status
++    data += command.rawValue
++    data += UInt16(1)           // CreditResponse
++    data += UInt32(0x00000001)  // Flags: SERVER_TO_REDIR
++    data += nextCommand
++    data += messageId
++    data += UInt32(0)           // Reserved
++    data += UInt32(1)           // TreeId
++    data += UInt64(0x1122334455667788)
++    data += Data(count: 16)     // Signature
++    return data
++  }
++
++  static func utf16(_ string: String) -> Data {
++    string.data(using: .utf16LittleEndian)!
++  }
++
++  // MARK: - SMB2 responses
++
++  static func negotiate(maxReadSize: UInt32 = 65536, securityBuffer: Data = Data(repeating: 0x60, count: 32)) -> Data {
++    var data = header(command: .negotiate)
++    data += UInt16(65)
++    data += UInt16(0x0001)      // SecurityMode
++    data += UInt16(0x0210)      // DialectRevision
++    data += UInt16(0)           // NegotiateContextCount
++    data += Data(repeating: 0xAB, count: 16)
++    data += UInt32(0)           // Capabilities
++    data += UInt32(65536)       // MaxTransactSize
++    data += maxReadSize
++    data += UInt32(65536)       // MaxWriteSize
++    data += UInt64(0)
++    data += UInt64(0)
++    data += UInt16(128)         // SecurityBufferOffset
++    data += UInt16(securityBuffer.count)
++    data += UInt32(0)
++    data += securityBuffer
++    return data
++  }
++
++  static func ntlmChallenge() -> Data {
++    let targetName = utf16("SERVER")
++    var targetInfo = Data()
++    targetInfo += UInt16(0x0001)
++    targetInfo += UInt16(targetName.count)
++    targetInfo += targetName
++    targetInfo += UInt16(0x0000)
++    targetInfo += UInt16(0)
++
++    var data = Data()
++    data += UInt64(0x005053534D4C544E)
++    data += UInt32(2)
++    data += UInt16(targetName.count)
++    data += UInt16(targetName.count)
++    data += UInt32(56)
++    data += UInt32(0xE2898215)
++    data += UInt64(0x0123456789ABCDEF)
++    data += UInt64(0)
++    data += UInt16(targetInfo.count)
++    data += UInt16(targetInfo.count)
++    data += UInt32(56 + UInt32(targetName.count))
++    data += UInt64(0x0F00000000020A00)
++    data += targetName
++    data += targetInfo
++    return data
++  }
++
++  static func sessionSetup() -> Data {
++    let blob = ntlmChallenge()
++    var data = header(command: .sessionSetup, status: 0xC0000016)
++    data += UInt16(9)
++    data += UInt16(0)
++    data += UInt16(72)
++    data += UInt16(blob.count)
++    data += blob
++    return data
++  }
++
++  static func treeConnect() -> Data {
++    var data = header(command: .treeConnect)
++    data += UInt16(16)
++    data += UInt8(1)
++    data += UInt8(0)
++    data += UInt32(0)
++    data += UInt32(0)
++    data += UInt32(0x001F01FF)
++    return data
++  }
++
++  static func create(contexts: Data = Data(repeating: 0x11, count: 24)) -> Data {
++    var data = header(command: .create)
++    data += UInt16(89)
++    data += UInt8(0)
++    data += UInt8(0)
++    data += UInt32(1)
++    data += UInt64(132_000_000_000_000_000)
++    data += UInt64(132_000_000_000_000_000)
++    data += UInt64(132_000_000_000_000_000)
++    data += UInt64(132_000_000_000_000_000)
++    data += UInt64(4096)
++    data += UInt64(1234)
++    data += UInt32(0x20)
++    data += UInt32(0)
++    data += Data(repeating: 0x42, count: 16)
++    data += UInt32(contexts.isEmpty ? 0 : 152)
++    data += UInt32(contexts.count)
++    data += contexts
++    return data
++  }
++
++  static func close(nextCommand: UInt32 = 0) -> Data {
++    var data = header(command: .close, nextCommand: nextCommand)
++    data += UInt16(60)
++    data += UInt16(1)
++    data += UInt32(0)
++    for _ in 0..<6 { data += UInt64(42) }
++    data += UInt32(0x20)
++    return data
++  }
++
++  static func read(payload: Data = Data("hello, world".utf8)) -> Data {
++    var data = header(command: .read)
++    data += UInt16(17)
++    data += UInt8(80)
++    data += UInt8(0)
++    data += UInt32(payload.count)
++    data += UInt32(0)
++    data += UInt32(0)
++    data += payload
++    return data
++  }
++
++  static func write() -> Data {
++    var data = header(command: .write)
++    data += UInt16(17)
++    data += UInt16(0)
++    data += UInt32(512)
++    data += UInt32(0)
++    data += UInt16(0)
++    data += UInt16(0)
++    return data
++  }
++
++  static func fileDirectoryInformation(name: String, last: Bool) -> Data {
++    let nameData = utf16(name)
++    var entry = Data()
++    entry += UInt32(0)  // NextEntryOffset, patched below
++    entry += UInt32(0)
++    for _ in 0..<4 { entry += UInt64(132_000_000_000_000_000) }
++    entry += UInt64(99)
++    entry += UInt64(4096)
++    entry += UInt32(0x20)
++    entry += UInt32(nameData.count)
++    entry += nameData
++    let padded = (entry.count + 7) / 8 * 8
++    entry += Data(count: padded - entry.count)
++    if !last {
++      entry.replaceSubrange(0..<4, with: Data(from: UInt32(entry.count)))
++    }
++    return entry
++  }
++
++  static func queryDirectory() -> Data {
++    let buffer = fileDirectoryInformation(name: ".", last: false)
++      + fileDirectoryInformation(name: "Report.pdf", last: false)
++      + fileDirectoryInformation(name: "Ærø ø.txt", last: true)
++    var data = header(command: .queryDirectory)
++    data += UInt16(9)
++    data += UInt16(72)
++    data += UInt32(buffer.count)
++    data += buffer
++    return data
++  }
++
++  static func fileAllInformation() -> Data {
++    let name = utf16(#"\dir\file.txt"#)
++    var data = Data()
++    for _ in 0..<4 { data += UInt64(132_000_000_000_000_000) }  // Basic
++    data += UInt32(0x20)
++    data += UInt32(0)
++    data += UInt64(4096)        // Standard
++    data += UInt64(1234)
++    data += UInt32(1)
++    data += UInt8(0)
++    data += UInt8(0)
++    data += UInt16(0)
++    data += UInt64(7)           // Internal
++    data += UInt32(0)           // Ea
++    data += UInt32(0x001F01FF)  // Access
++    data += UInt64(0)           // Position
++    data += UInt32(0)           // Mode
++    data += UInt32(0)           // Alignment
++    data += UInt32(name.count)  // Name
++    data += name
++    return data
++  }
++
++  static func fileFsSizeInformation() -> Data {
++    var data = Data()
++    data += UInt64(1_000_000)
++    data += UInt64(500_000)
++    data += UInt32(8)
++    data += UInt32(512)
++    return data
++  }
++
++  static func fileFsVolumeInformation() -> Data {
++    let label = utf16("Volume")
++    var data = Data()
++    data += UInt64(132_000_000_000_000_000)
++    data += UInt32(0xDEADBEEF)
++    data += UInt32(label.count)
++    data += UInt8(0)
++    data += UInt8(0)
++    data += label
++    return data
++  }
++
++  static func fileIdBothDirectoryInformation() -> Data {
++    let name = utf16("photo.jpg")
++    var data = Data()
++    data += UInt32(0)
++    data += UInt32(0)
++    for _ in 0..<4 { data += UInt64(132_000_000_000_000_000) }
++    data += UInt64(10)
++    data += UInt64(4096)
++    data += UInt32(0x20)
++    data += UInt32(name.count)
++    data += UInt32(0)
++    data += UInt8(0)
++    data += UInt8(0)
++    data += Data(count: 24)
++    data += UInt16(0)
++    data += Data(repeating: 0x01, count: 8)
++    data += name
++    return data
++  }
++
++  static func queryInfo(buffer: Data = fileAllInformation()) -> Data {
++    var data = header(command: .queryInfo)
++    data += UInt16(9)
++    data += UInt16(72)
++    data += UInt32(buffer.count)
++    data += buffer
++    return data
++  }
++
++  static func wstr(_ string: String) -> Data {
++    let value = utf16(string) + Data(count: 2)
++    var data = Data()
++    data += UInt32(value.count / 2)
++    data += UInt32(0)
++    data += UInt32(value.count / 2)
++    data += value
++    if data.count % 4 != 0 { data += Data(count: 4 - data.count % 4) }
++    return data
++  }
++
++  static func netShareEnumStub(_ shares: [(String, UInt32, String)] = [
++    ("Media", 0, "Films and music"),
++    ("IPC$", 0x80000003, "IPC Service"),
++    ("Backups", 0, ""),
++  ]) -> Data {
++    var data = Data()
++    data += UInt32(1)                   // level
++    data += UInt32(1)                   // switch
++    data += UInt32(0x00020000)          // container referent
++    data += UInt32(shares.count)
++    data += UInt32(0x00020004)          // array referent
++    data += UInt32(shares.count)
++    for (index, share) in shares.enumerated() {
++      data += UInt32(0x00020008 + UInt32(index) * 8)
++      data += share.1
++      data += UInt32(0x0002000C + UInt32(index) * 8)
++    }
++    for share in shares {
++      data += wstr(share.0)
++      data += wstr(share.2)
++    }
++    data += UInt32(shares.count)        // totalEntries
++    data += UInt32(0)                   // resume handle referent
++    data += UInt32(0)                   // WERROR
++    return data
++  }
++
++  static func dcerpcResponse(stub: Data = netShareEnumStub(), packetType: UInt8 = 2, flags: UInt8 = 0x03) -> Data {
++    var data = Data()
++    data += UInt8(5)
++    data += UInt8(0)
++    data += packetType
++    data += flags
++    data += UInt32(0x10)
++    data += UInt16(24 + stub.count)
++    data += UInt16(0)
++    data += UInt32(1)
++    data += UInt32(stub.count)
++    data += UInt16(0)
++    data += UInt8(0)
++    data += UInt8(0)
++    data += stub
++    return data
++  }
++
++  static func ioctl(output: Data = dcerpcResponse()) -> Data {
++    var data = header(command: .ioctl)
++    data += UInt16(49)
++    data += UInt16(0)
++    data += UInt32(0x0011C017)
++    data += Data(repeating: 0x42, count: 16)
++    data += UInt32(112)
++    data += UInt32(0)
++    data += UInt32(112)
++    data += UInt32(output.count)
++    data += UInt32(0)
++    data += UInt32(0)
++    data += output
++    return data
++  }
++
++  static func errorResponse(status: UInt32 = 0xC0000034) -> Data {
++    var data = header(command: .create, status: status)
++    data += UInt16(9)
++    data += UInt8(0)
++    data += UInt8(0)
++    data += UInt32(0)
++    data += UInt8(0)
++    return data
++  }
++
++  static func fourByteBody(_ command: Header.Command) -> Data {
++    var data = header(command: command)
++    data += UInt16(4)
++    data += UInt16(0)
++    return data
++  }
++
++  static func setInfo() -> Data {
++    var data = header(command: .setInfo)
++    data += UInt16(2)
++    return data
++  }
++
++  /// A compound CREATE + CLOSE reply, as `fileStat` expects.
++  static func compoundCreateClose() -> Data {
++    let first = create(contexts: Data())
++    let padded = first + Data(count: (8 - first.count % 8) % 8)
++    var chained = padded
++    chained.replaceSubrange(20..<24, with: Data(from: UInt32(padded.count)))
++    return chained + close()
++  }
++
++  /// A Direct TCP frame around an SMB2 message.
++  static func frame(_ message: Data) -> Data {
++    var data = Data()
++    data += UInt32(message.count).bigEndian
++    return data + message
++  }
++}
+diff --git a/Tests/SMBClientTests/Hardening/ResponseFuzzTests.swift b/Tests/SMBClientTests/Hardening/ResponseFuzzTests.swift
+new file mode 100644
+index 0000000..86b84e6
+--- /dev/null
++++ b/Tests/SMBClientTests/Hardening/ResponseFuzzTests.swift
+@@ -0,0 +1,194 @@
++import XCTest
++@testable import SMBClient
++
++// RUMSKROT-TESTS: no reply a server can send may trap the client. Every
++// parser is fed its well-formed fixture (must decode), every prefix of it
++// (must decode or throw), and seeded random corruptions (must decode or
++// throw). A trap fails the run by crashing the test process.
++final class ResponseFuzzTests: XCTestCase {
++  private struct Parser {
++    let name: String
++    let fixture: Data
++    let decode: (Data) throws -> Void
++  }
++
++  private let parsers: [Parser] = [
++    Parser(name: "Header", fixture: ResponseFixtures.header(command: .echo)) { _ = try Header(data: $0) },
++    Parser(name: "Negotiate", fixture: ResponseFixtures.negotiate()) { _ = try Negotiate.Response(data: $0) },
++    Parser(name: "SessionSetup", fixture: ResponseFixtures.sessionSetup()) {
++      let response = try SessionSetup.Response(data: $0)
++      _ = try NTLM.ChallengeMessage(data: response.buffer)
++    },
++    Parser(name: "NTLM.ChallengeMessage", fixture: ResponseFixtures.ntlmChallenge()) { _ = try NTLM.ChallengeMessage(data: $0) },
++    Parser(name: "TreeConnect", fixture: ResponseFixtures.treeConnect()) { _ = try TreeConnect.Response(data: $0) },
++    Parser(name: "TreeDisconnect", fixture: ResponseFixtures.fourByteBody(.treeDisconnect)) { _ = try TreeDisconnect.Response(data: $0) },
++    Parser(name: "Logoff", fixture: ResponseFixtures.fourByteBody(.logoff)) { _ = try Logoff.Response(data: $0) },
++    Parser(name: "Echo", fixture: ResponseFixtures.fourByteBody(.echo)) { _ = try Echo.Response(data: $0) },
++    Parser(name: "Flush", fixture: ResponseFixtures.fourByteBody(.flush)) { _ = try Flush.Response(data: $0) },
++    Parser(name: "Create", fixture: ResponseFixtures.create()) { _ = try Create.Response(data: $0) },
++    Parser(name: "Close", fixture: ResponseFixtures.close()) { _ = try Close.Response(data: $0) },
++    Parser(name: "Read", fixture: ResponseFixtures.read()) { _ = try Read.Response(data: $0) },
++    Parser(name: "Write", fixture: ResponseFixtures.write()) { _ = try Write.Response(data: $0) },
++    Parser(name: "SetInfo", fixture: ResponseFixtures.setInfo()) { _ = try SetInfo.Response(data: $0) },
++    Parser(name: "QueryDirectory", fixture: ResponseFixtures.queryDirectory()) {
++      let files = try QueryDirectory.Response(data: $0).files()
++      _ = files.map { File(fileInfo: $0) }
++    },
++    Parser(name: "QueryInfo+FileAllInformation", fixture: ResponseFixtures.queryInfo()) {
++      _ = try FileAllInformation(data: QueryInfo.Response(data: $0).buffer)
++    },
++    Parser(name: "FileFsSizeInformation", fixture: ResponseFixtures.fileFsSizeInformation()) { _ = try FileFsSizeInformation(data: $0) },
++    Parser(name: "FileFsVolumeInformation", fixture: ResponseFixtures.fileFsVolumeInformation()) { _ = try FileFsVolumeInformation(data: $0) },
++    Parser(name: "FileIdBothDirectoryInformation", fixture: ResponseFixtures.fileIdBothDirectoryInformation()) { _ = try FileIdBothDirectoryInformation(data: $0) },
++    Parser(name: "IOCtl+DCERPC+NetShareEnum", fixture: ResponseFixtures.ioctl()) {
++      let ioctl = try IOCtl.Response(data: $0)
++      let rpc = try DCERPC.Response(data: ioctl.buffer)
++      _ = try NetShareEnumResponse(data: rpc.stub)
++    },
++    Parser(name: "NetShareEnumResponse", fixture: ResponseFixtures.netShareEnumStub()) { _ = try NetShareEnumResponse(data: $0) },
++    Parser(name: "ErrorResponse", fixture: ResponseFixtures.errorResponse()) { _ = try ErrorResponse(data: $0) },
++    Parser(name: "DirectTCPPacket", fixture: ResponseFixtures.frame(ResponseFixtures.close())) { _ = try DirectTCPPacket(response: $0) },
++  ]
++
++  func testEveryFixtureDecodes() throws {
++    for parser in parsers {
++      XCTAssertNoThrow(try parser.decode(parser.fixture), parser.name)
++    }
++  }
++
++  func testFixturesDecodeTheValuesTheyCarry() throws {
++    let files = try QueryDirectory.Response(data: ResponseFixtures.queryDirectory()).files()
++    XCTAssertEqual(files.map(\.fileName), [".", "Report.pdf", "Ærø ø.txt"])
++
++    let read = try Read.Response(data: ResponseFixtures.read())
++    XCTAssertEqual(read.buffer, Data("hello, world".utf8))
++
++    let rpc = try DCERPC.Response(data: IOCtl.Response(data: ResponseFixtures.ioctl()).buffer)
++    let shares = try NetShareEnumResponse(data: rpc.stub).shareInfo1.shareInfo
++    XCTAssertEqual(shares.map(\.name.value), ["Media", "IPC$", "Backups"])
++    XCTAssertEqual(shares.map(\.comment.value), ["Films and music", "IPC Service", ""])
++
++    let info = try FileAllInformation(data: ResponseFixtures.fileAllInformation())
++    XCTAssertEqual(info.nameInformation.fileName, #"\dir\file.txt"#)
++    XCTAssertEqual(info.standardInformation.endOfFile, 1234)
++  }
++
++  /// Decoding from a slice whose indices do not start at zero must read
++  /// the same values: offsets in a reply are relative to the reply.
++  func testSlicesDecodeLikeTheirBytes() throws {
++    let fixture = ResponseFixtures.read()
++    let slice = (Data([0xEE, 0xEE, 0xEE]) + fixture).dropFirst(3)
++    XCTAssertNotEqual(slice.startIndex, 0)
++    XCTAssertEqual(try Read.Response(data: slice).buffer, try Read.Response(data: fixture).buffer)
++
++    let directory = (Data([0xEE]) + ResponseFixtures.queryDirectory()).dropFirst()
++    XCTAssertEqual(try QueryDirectory.Response(data: directory).files().count, 3)
++  }
++
++  func testEveryTruncationThrowsInsteadOfTrapping() {
++    for parser in parsers {
++      var threw = 0
++      for length in 0..<parser.fixture.count {
++        do {
++          try parser.decode(parser.fixture.prefix(length))
++        } catch is ResponseDecodingError {
++          threw += 1
++        } catch {
++          XCTFail("\(parser.name) truncated to \(length) threw \(error), not ResponseDecodingError")
++        }
++      }
++      // Some parsers ignore trailing fields; most prefixes must still fail.
++      XCTAssertGreaterThan(threw, 0, parser.name)
++    }
++  }
++
++  func testRandomCorruptionNeverTraps() {
++    var rng = SplitMix64(seed: 0x5EED_189)
++    for parser in parsers {
++      for _ in 0..<2_000 {
++        let mutated = mutate(parser.fixture, using: &rng)
++        do {
++          try parser.decode(mutated)
++        } catch {
++          // Throwing is the correct outcome for most mutations.
++        }
++      }
++    }
++  }
++
++  /// Hand-picked hostile values the random walk is unlikely to hit.
++  func testHostileLengthsAndCountsThrow() {
++    // A share count no reply could hold.
++    var stub = ResponseFixtures.netShareEnumStub()
++    stub.replaceSubrange(12..<16, with: Data(from: UInt32.max))
++    stub.replaceSubrange(20..<24, with: Data(from: UInt32.max))
++    XCTAssertThrowsError(try NetShareEnumResponse(data: stub))
++
++    // A Read whose DataLength runs off the end.
++    var read = ResponseFixtures.read()
++    read.replaceSubrange(68..<72, with: Data(from: UInt32.max))
++    XCTAssertThrowsError(try Read.Response(data: read))
++
++    // A directory entry whose NextEntryOffset points past the buffer.
++    var directory = ResponseFixtures.queryDirectory()
++    directory.replaceSubrange(72..<76, with: Data(from: UInt32(0x7FFF_FFF0)))
++    XCTAssertThrowsError(try QueryDirectory.Response(data: directory).files())
++
++    // An RPC fragment length shorter than its own header.
++    var rpc = ResponseFixtures.dcerpcResponse()
++    rpc.replaceSubrange(8..<10, with: Data(from: UInt16(4)))
++    XCTAssertThrowsError(try DCERPC.Response(data: rpc))
++
++    // An AV pair id NTLM does not define.
++    var pair = Data()
++    pair += UInt16(0x7777)
++    pair += UInt16(0)
++    XCTAssertThrowsError(try AVPair(data: pair))
++  }
++
++  private func mutate(_ data: Data, using rng: inout SplitMix64) -> Data {
++    var bytes = [UInt8](data)
++    switch rng.next() % 5 {
++    case 0:
++      // Flip a handful of bytes anywhere.
++      for _ in 0..<(1 + Int(rng.next() % 8)) where !bytes.isEmpty {
++        bytes[Int(rng.next() % UInt64(bytes.count))] = UInt8(truncatingIfNeeded: rng.next())
++      }
++    case 1:
++      // Saturate a 16/32-bit field: the lengths and offsets live here.
++      if bytes.count >= 4 {
++        let at = Int(rng.next() % UInt64(bytes.count - 3))
++        let fill: UInt8 = rng.next() % 2 == 0 ? 0xFF : 0x00
++        for i in at..<(at + (rng.next() % 2 == 0 ? 2 : 4)) { bytes[i] = fill }
++      }
++    case 2:
++      // Truncate and corrupt.
++      bytes = Array(bytes.prefix(Int(rng.next() % UInt64(bytes.count + 1))))
++      if !bytes.isEmpty { bytes[Int(rng.next() % UInt64(bytes.count))] ^= 0xFF }
++    case 3:
++      // Append garbage.
++      bytes += (0..<Int(rng.next() % 64)).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
++    default:
++      // Entirely random bytes of a similar size.
++      bytes = (0..<Int(rng.next() % UInt64(bytes.count * 2 + 1))).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
++    }
++    return Data(bytes)
++  }
++}
++
++/// A seedable generator, so a failing corruption can be replayed.
++struct SplitMix64: RandomNumberGenerator {
++  private var state: UInt64
++
++  init(seed: UInt64) {
++    state = seed
++  }
++
++  mutating func next() -> UInt64 {
++    state &+= 0x9E37_79B9_7F4A_7C15
++    var z = state
++    z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
++    z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
++    return z ^ (z >> 31)
++  }
++}

@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kim Hansen <github@kimhansen.dk>
+Date: Sat, 17 Oct 2026 15:17:46 +0200
+Subject: [PATCH] listShares refuses an RPC fault or a multi-fragment reply
+ instead of misparsing it
+
+enumShareAll decoded whatever came back from the srvsvc pipe as a
+NetShareEnum response stub. A fault PDU, or the first fragment of a
+reply that did not fit in one (a long share list), is now a
+ResponseDecodingError rather than a stub decoded from the wrong bytes.
+
+RUMSKROT-HARDEN 5/5
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013Swhv8UXni3MZr9Kcar7wJ
+---
+ Sources/SMBClient/Session.swift | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/Sources/SMBClient/Session.swift b/Sources/SMBClient/Session.swift
+index d9dd91a..5b3a5e0 100644
+--- a/Sources/SMBClient/Session.swift
++++ b/Sources/SMBClient/Session.swift
+@@ -189,6 +189,15 @@ public class Session {
+     let ioCtlResponse = try await session.netShareEnum(fileId: createResponse.fileId)
+ 
+     let rpcResponse = try DCERPC.Response(data: ioCtlResponse.buffer)
++    // RUMSKROT-HARDEN: only a complete, single-fragment RPC response
++    // carries a NetShareEnum stub; a fault or a partial reply is refused
++    // rather than misparsed.
++    guard rpcResponse.commonFields.packetType == DCERPC.PacketType.response.rawValue else {
++      throw ResponseDecodingError.invalidValue(field: "DCERPC.packetType", value: UInt64(rpcResponse.commonFields.packetType))
++    }
++    guard rpcResponse.commonFields.flags.contains(.lastFragment) else {
++      throw ResponseDecodingError.missingResponse(expected: 2, received: 1)
++    }
+     let netShareEnumResponse = try NetShareEnumResponse(data: rpcResponse.stub)
+ 
+     let shares = netShareEnumResponse.shareInfo1.shareInfo

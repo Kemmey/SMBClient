@@ -1,0 +1,1806 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kim Hansen <github@kimhansen.dk>
+Date: Sat, 17 Oct 2026 15:15:43 +0200
+Subject: [PATCH] Bounds-checked ByteReader; every response parser throws
+ ResponseDecodingError instead of trapping
+
+ByteReader's reads now check offset and count against the bytes actually
+received and throw ResponseDecodingError.outOfBounds; Data.to(type:) uses
+loadUnaligned, since a slice is rarely aligned for the type being read.
+Message.Response.init(data:) and every response, file-information,
+NTLM and DCERPC parser are now throwing, and Session/Connection propagate
+the error to the caller instead of the process trapping on a truncated or
+hostile reply. Wire counts that size an allocation (NetShareInfo1.count,
+WStr.actualCount) and directory-entry offsets are checked against the
+remaining bytes, and an unknown AV pair id is an error, not a force unwrap.
+The generic read is constrained to FixedWidthInteger, which surfaced one
+misread: FileFsVolumeInformation.SupportsObjects is a one-byte BOOLEAN,
+but `reader.read() == 1` inferred Int and consumed eight bytes, shifting
+the volume label. availableSpace multiplies in 64 bits and saturates.
+
+RUMSKROT-HARDEN 1/5
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013Swhv8UXni3MZr9Kcar7wJ
+---
+ Sources/SMBClient/Auth/NTLM.swift             | 42 +++++++------
+ Sources/SMBClient/ByteReader.swift            | 45 ++++++++++----
+ Sources/SMBClient/Connection.swift            | 23 +++++--
+ Sources/SMBClient/DCERPC/DCERPC.swift         | 36 +++++------
+ Sources/SMBClient/DCERPC/NetShareEnum.swift   | 60 +++++++++++--------
+ Sources/SMBClient/Messages/Close.swift        | 24 ++++----
+ Sources/SMBClient/Messages/Create.swift       | 38 ++++++------
+ Sources/SMBClient/Messages/Echo.swift         |  8 +--
+ .../Messages/Errors/ErrorResponse.swift       | 10 ++--
+ .../Errors/ResponseDecodingError.swift        | 26 ++++++++
+ .../FileAccessInformation.swift               |  8 +--
+ .../FileAlignmentInformation.swift            |  8 +--
+ .../FileAllInformation.swift                  | 20 +++----
+ .../FileBasicInformation.swift                | 18 +++---
+ .../FileDirectoryInformation.swift            | 24 ++++----
+ .../FileEaInformation.swift                   |  8 +--
+ .../FileIdBothDirectoryInformation.swift      | 36 +++++------
+ .../FileInternalInformation.swift             |  8 +--
+ .../FileModeInformation.swift                 |  8 +--
+ .../FileNameInformation.swift                 | 12 ++--
+ .../FilePositionInformation.swift             |  8 +--
+ .../FileStandardInformation.swift             | 18 +++---
+ .../FileFsDeviceInformation.swift             |  6 +-
+ .../FileFsLabelInformation.swift              |  6 +-
+ .../FileFsSizeInformation.swift               | 10 ++--
+ .../FileFsVolumeInformation.swift             | 15 ++---
+ Sources/SMBClient/Messages/Flush.swift        |  8 +--
+ Sources/SMBClient/Messages/Header.swift       | 32 +++++-----
+ Sources/SMBClient/Messages/IOCtl.swift        | 26 ++++----
+ Sources/SMBClient/Messages/Logoff.swift       |  8 +--
+ Sources/SMBClient/Messages/Message.swift      |  2 +-
+ Sources/SMBClient/Messages/Negotiate.swift    | 36 +++++------
+ ...rectory+CustomDebugStringConvertible.swift |  2 +-
+ .../SMBClient/Messages/QueryDirectory.swift   | 28 +++++----
+ Sources/SMBClient/Messages/QueryInfo.swift    | 12 ++--
+ Sources/SMBClient/Messages/Read.swift         | 18 +++---
+ Sources/SMBClient/Messages/SessionSetup.swift | 14 ++---
+ Sources/SMBClient/Messages/SetInfo.swift      |  6 +-
+ Sources/SMBClient/Messages/TreeConnect.swift  | 16 ++---
+ .../SMBClient/Messages/TreeDisconnect.swift   |  8 +--
+ Sources/SMBClient/Messages/Write.swift        | 16 ++---
+ Sources/SMBClient/Misc/Data.swift             |  3 +-
+ Sources/SMBClient/SMBClient.swift             | 10 ++--
+ Sources/SMBClient/Session.swift               | 35 ++++++-----
+ Sources/SMBClient/Transport.swift             |  4 +-
+ Sources/SMBClient/TreeAccessor.swift          | 10 ++--
+ Tests/SMBClientTests/ConnectionTests.swift    | 14 ++---
+ 47 files changed, 462 insertions(+), 371 deletions(-)
+ create mode 100644 Sources/SMBClient/Messages/Errors/ResponseDecodingError.swift
+
+diff --git a/Sources/SMBClient/Auth/NTLM.swift b/Sources/SMBClient/Auth/NTLM.swift
+index a98673b..000b1aa 100644
+--- a/Sources/SMBClient/Auth/NTLM.swift
++++ b/Sources/SMBClient/Auth/NTLM.swift
+@@ -87,23 +87,23 @@ public enum NTLM {
+ 
+     private let buffer: Data
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      signature = reader.read()
+-      messageType = reader.read()
+-      targetNameLen = reader.read()
+-      targetNameMaxLen = reader.read()
+-      targetNameBufferOffset = reader.read()
+-      negotiateFlags = NegotiateFlags(rawValue: reader.read())
+-      serverChallenge = reader.read()
+-      reserved = reader.read()
+-      targetInfoLen = reader.read()
+-      targetInfoMaxLen = reader.read()
+-      targetInfoBufferOffset = reader.read()
+-      version = reader.read()
+-      targetName = reader.read(from: Int(targetNameBufferOffset), count: Int(targetNameLen))
+-      targetInfo = reader.read(from: Int(targetInfoBufferOffset), count: Int(targetInfoLen))
++      signature = try reader.read()
++      messageType = try reader.read()
++      targetNameLen = try reader.read()
++      targetNameMaxLen = try reader.read()
++      targetNameBufferOffset = try reader.read()
++      negotiateFlags = try NegotiateFlags(rawValue: reader.read())
++      serverChallenge = try reader.read()
++      reserved = try reader.read()
++      targetInfoLen = try reader.read()
++      targetInfoMaxLen = try reader.read()
++      targetInfoBufferOffset = try reader.read()
++      version = try reader.read()
++      targetName = try reader.read(from: Int(targetNameBufferOffset), count: Int(targetNameLen))
++      targetInfo = try reader.read(from: Int(targetInfoBufferOffset), count: Int(targetInfoLen))
+ 
+       buffer = data
+     }
+@@ -437,12 +437,16 @@ struct AVPair {
+     self.avValue = avValue
+   }
+ 
+-  init(data: Data) {
++  init(data: Data) throws {
+     let reader = ByteReader(data)
+     
+-    avId = AVId(rawValue: reader.read())!
+-    avLen = reader.read()
+-    avValue = reader.read(count: Int(avLen))
++    let rawAVId: UInt16 = try reader.read()
++    guard let avId = AVId(rawValue: rawAVId) else {
++      throw ResponseDecodingError.invalidValue(field: "AVPair.avId", value: UInt64(rawAVId))
++    }
++    self.avId = avId
++    avLen = try reader.read()
++    avValue = try reader.read(count: Int(avLen))
+   }
+   
+   func encoded() -> Data {
+diff --git a/Sources/SMBClient/ByteReader.swift b/Sources/SMBClient/ByteReader.swift
+index 49a0140..f35e9d2 100644
+--- a/Sources/SMBClient/ByteReader.swift
++++ b/Sources/SMBClient/ByteReader.swift
+@@ -1,11 +1,13 @@
+ import Foundation
+ 
++// RUMSKROT-HARDEN: every read is bounds-checked and throws instead of
++// trapping, so a truncated or hostile response can never crash the client.
+ class ByteReader {
+   private let data: Data
+   private(set) var offset: Data.Index
+ 
+   var availableBytes: Int {
+-    return data.count - offset
++    return max(0, data.endIndex - offset)
+   }
+ 
+   init(_ data: Data) {
+@@ -13,22 +15,25 @@ class ByteReader {
+     offset = data.startIndex
+   }
+ 
+-  func read<T>() -> T {
++  func read<T: FixedWidthInteger>() throws -> T {
+     let size = MemoryLayout<T>.size
+-    let value = data[offset..<(offset + size)].to(type: T.self)
++    let value = try slice(count: size).to(type: T.self)
+     offset += size
+     return value
+   }
+ 
+-  func read(count: Int) -> Data {
+-    let value = data[offset..<(offset + count)]
++  func read(count: Int) throws -> Data {
++    let value = try slice(count: count)
+     offset += count
+     return Data(value)
+   }
+ 
+-  func read(from: Int, count: Int) -> Data {
+-    seek(to: data.startIndex + from)
+-    return read(count: count)
++  func read(from: Int, count: Int) throws -> Data {
++    guard from >= 0 else {
++      throw ResponseDecodingError.outOfBounds(offset: from, count: count, available: data.count)
++    }
++    seek(to: from)
++    return try read(count: count)
+   }
+ 
+   func seek(to: Int) {
+@@ -36,17 +41,33 @@ class ByteReader {
+   }
+ 
+   func remaining() -> Data {
++    guard offset >= data.startIndex, offset < data.endIndex else { return Data() }
+     return Data(data[offset...])
+   }
++
++  private func slice(count: Int) throws -> Data {
++    guard count >= 0,
++          offset >= data.startIndex,
++          offset <= data.endIndex,
++          count <= data.endIndex - offset
++    else {
++      throw ResponseDecodingError.outOfBounds(
++        offset: offset - data.startIndex,
++        count: count,
++        available: data.count
++      )
++    }
++    return data[offset..<(offset + count)]
++  }
+ }
+ 
+ extension ByteReader {
+-  func read() -> Bool {
+-    let value: UInt8 = read()
++  func read() throws -> Bool {
++    let value: UInt8 = try read()
+     return value == 1
+   }
+ 
+-  func read() -> UUID {
+-    read(count: 16).to(type: UUID.self)
++  func read() throws -> UUID {
++    try read(count: 16).to(type: UUID.self)
+   }
+ }
+diff --git a/Sources/SMBClient/Connection.swift b/Sources/SMBClient/Connection.swift
+index f900e58..4007757 100644
+--- a/Sources/SMBClient/Connection.swift
++++ b/Sources/SMBClient/Connection.swift
+@@ -159,7 +159,13 @@ public class Connection {
+           break
+         }
+ 
+-        let transportPacket = DirectTCPPacket(response: self.buffer)
++        let transportPacket: DirectTCPPacket
++        do {
++          transportPacket = try DirectTCPPacket(response: self.buffer)
++        } catch {
++          completion(.failure(error))
++          return
++        }
+         let length = Int(transportPacket.protocolLength)
+         self.buffer = Data(transportPacket.smb2Message)
+ 
+@@ -174,8 +180,9 @@ public class Connection {
+ 
+             var header: Header
+             var response = Data()
++            do {
+             repeat {
+-              header = reader.read()
++              header = try reader.read()
+ 
+               switch NTStatus(header.status) {
+               case
+@@ -186,7 +193,7 @@ public class Connection {
+                 response += data
+               case .pending:
+                 if self.buffer.count >= 4 {
+-                  let transportPacket = DirectTCPPacket(response: self.buffer)
++                  let transportPacket = try DirectTCPPacket(response: self.buffer)
+                   let length = Int(transportPacket.protocolLength)
+ 
+                   if self.buffer.count < 4 + length {
+@@ -198,7 +205,7 @@ public class Connection {
+                   self.buffer = Data(self.buffer.suffix(from: 4 + length))
+ 
+                   let reader = ByteReader(data)
+-                  let header: Header = reader.read()
++                  let header: Header = try reader.read()
+ 
+                   switch NTStatus(header.status) {
+                   case
+@@ -209,7 +216,7 @@ public class Connection {
+                     response += data
+                     break
+                   default:
+-                    completion(.failure(ErrorResponse(data: data)))
++                    completion(.failure(try ErrorResponse(data: data)))
+                     return
+                   }
+                 } else {
+@@ -217,13 +224,17 @@ public class Connection {
+                   return
+                 }
+               default:
+-                completion(.failure(ErrorResponse(data: Data(data[offset...]))))
++                completion(.failure(try ErrorResponse(data: Data(data[offset...]))))
+                 return
+               }
+ 
+               offset += Int(header.nextCommand)
+               reader.seek(to: offset)
+             } while header.nextCommand > 0
++            } catch {
++              completion(.failure(error))
++              return
++            }
+ 
+             completion(.success(response))
+           case .failure(let error):
+diff --git a/Sources/SMBClient/DCERPC/DCERPC.swift b/Sources/SMBClient/DCERPC/DCERPC.swift
+index 4b00095..73f653e 100644
+--- a/Sources/SMBClient/DCERPC/DCERPC.swift
++++ b/Sources/SMBClient/DCERPC/DCERPC.swift
+@@ -23,17 +23,17 @@ enum DCERPC {
+       self.callID = callID
+     }
+ 
+-    init(data: Data) {
++    init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      version = reader.read()
+-      minorVersion = reader.read()
+-      packetType = reader.read()
+-      flags = Flags(rawValue: reader.read())
+-      dataRepresentation = reader.read()
+-      fragLength = reader.read()
+-      authLength = reader.read()
+-      callID = reader.read()
++      version = try reader.read()
++      minorVersion = try reader.read()
++      packetType = try reader.read()
++      flags = try Flags(rawValue: reader.read())
++      dataRepresentation = try reader.read()
++      fragLength = try reader.read()
++      authLength = try reader.read()
++      callID = try reader.read()
+     }
+ 
+     func encoded() -> Data {
+@@ -153,15 +153,15 @@ enum DCERPC {
+     let reserved: UInt8
+     let stub: Data
+ 
+-    init(data: Data) {
++    init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      commonFields = reader.read()
+-      allocHint = reader.read()
+-      contextID = reader.read()
+-      cancelCount = reader.read()
+-      reserved = reader.read()
+-      stub = reader.read(count: Int(commonFields.fragLength) - reader.offset)
++      commonFields = try reader.read()
++      allocHint = try reader.read()
++      contextID = try reader.read()
++      cancelCount = try reader.read()
++      reserved = try reader.read()
++      stub = try reader.read(count: Int(commonFields.fragLength) - reader.offset)
+     }
+   }
+ 
+@@ -365,7 +365,7 @@ enum DCERPC {
+ }
+ 
+ extension ByteReader {
+-  func read() -> DCERPC.CommonFields {
+-    DCERPC.CommonFields(data: read(count: 16))
++  func read() throws -> DCERPC.CommonFields {
++    try DCERPC.CommonFields(data: read(count: 16))
+   }
+ }
+diff --git a/Sources/SMBClient/DCERPC/NetShareEnum.swift b/Sources/SMBClient/DCERPC/NetShareEnum.swift
+index db08929..8e6d93f 100644
+--- a/Sources/SMBClient/DCERPC/NetShareEnum.swift
++++ b/Sources/SMBClient/DCERPC/NetShareEnum.swift
+@@ -69,22 +69,26 @@ struct WStr {
+     terminator = 0
+   }
+ 
+-  init(referentID: UInt32, byteReader: ByteReader) {
++  init(referentID: UInt32, byteReader: ByteReader) throws {
+     self.referentID = referentID
+ 
+-    maxCount = byteReader.read()
+-    offset = byteReader.read()
+-    actualCount = byteReader.read()
++    maxCount = try byteReader.read()
++    offset = try byteReader.read()
++    actualCount = try byteReader.read()
+ 
++    guard UInt64(actualCount) * 2 <= UInt64(byteReader.availableBytes) else {
++      throw ResponseDecodingError.invalidValue(field: "WStr.actualCount", value: UInt64(actualCount))
++    }
+     let valueCount = Int(actualCount) * 2
+-    valueData = byteReader.read(count: valueCount)
++    valueData = try byteReader.read(count: valueCount)
+     if valueCount % 4 != 0 {
+-      terminator = byteReader.read()
++      terminator = try byteReader.read()
+     } else {
+       terminator = 0
+     }
+ 
+-    let valueData = Data(valueData)[0..<valueData.count - 2]
++    // RUMSKROT-HARDEN: an empty string has no terminator to drop.
++    let valueData = Data(valueData).prefix(max(0, valueData.count - 2))
+     value = String(data: valueData, encoding: .utf16LittleEndian) ?? valueData.hex
+   }
+ 
+@@ -135,20 +139,20 @@ struct NetShareEnumResponse {
+   let resumeHandle: UInt32
+   let status: UInt32
+ 
+-  init(data: Data) {
++  init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    level = reader.read()
+-    shareCtr = reader.read()
+-    netShareCtr = NetShareCtr(
++    level = try reader.read()
++    shareCtr = try reader.read()
++    netShareCtr = try NetShareCtr(
+       refferentID: reader.read(),
+       count: reader.read()
+     )
+-    shareInfo1 = NetShareInfo1(byteReader: reader)
+-    padding = reader.read(count: reader.offset % 4 == 0 ? 0 : 4 - reader.offset % 4)
+-    totalEntries = reader.read()
+-    resumeHandle = reader.read()
+-    status = reader.read()
++    shareInfo1 = try NetShareInfo1(byteReader: reader)
++    padding = try reader.read(count: reader.offset % 4 == 0 ? 0 : 4 - reader.offset % 4)
++    totalEntries = try reader.read()
++    resumeHandle = try reader.read()
++    status = try reader.read()
+   }
+ 
+   struct NetShareCtr {
+@@ -161,19 +165,25 @@ struct NetShareEnumResponse {
+     let count: UInt32
+     let shareInfo: [ShareInfo1]
+ 
+-    init(byteReader: ByteReader) {
+-      refferentID = byteReader.read()
+-      count = byteReader.read()
+-      shareInfo = (0..<count)
++    init(byteReader: ByteReader) throws {
++      refferentID = try byteReader.read()
++      count = try byteReader.read()
++      // RUMSKROT-HARDEN: `count` comes off the wire; each entry is at least
++      // 12 bytes, so a count the remaining bytes cannot hold is refused
++      // before anything is allocated for it.
++      guard UInt64(count) * 12 <= UInt64(byteReader.availableBytes) else {
++        throw ResponseDecodingError.invalidValue(field: "NetShareInfo1.count", value: UInt64(count))
++      }
++      shareInfo = try (0..<count)
+         .map { _ in
+-          let nameRefferentID: UInt32 = byteReader.read()
+-          let type: UInt32 = byteReader.read()
+-          let commentRefferentID: UInt32 = byteReader.read()
++          let nameRefferentID: UInt32 = try byteReader.read()
++          let type: UInt32 = try byteReader.read()
++          let commentRefferentID: UInt32 = try byteReader.read()
+           return (nameRefferentID, type, commentRefferentID)
+         }
+         .map { (nameRefferentID, type, commentRefferentID) in
+-          let name = WStr(referentID: nameRefferentID, byteReader: byteReader)
+-          let comment = WStr(referentID: commentRefferentID, byteReader: byteReader)
++          let name = try WStr(referentID: nameRefferentID, byteReader: byteReader)
++          let comment = try WStr(referentID: commentRefferentID, byteReader: byteReader)
+           return ShareInfo1(name: name, type: type, comment: comment)
+         }
+     }
+diff --git a/Sources/SMBClient/Messages/Close.swift b/Sources/SMBClient/Messages/Close.swift
+index a19f7d3..e7dfc2a 100644
+--- a/Sources/SMBClient/Messages/Close.swift
++++ b/Sources/SMBClient/Messages/Close.swift
+@@ -59,20 +59,20 @@ public enum Close {
+     public let endOfFile: UInt64
+     public let fileAttributes: UInt32
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
+-      structureSize = reader.read()
+-      flags = reader.read()
+-      reserved = reader.read()
+-      creationTime = reader.read()
+-      lastAccessTime = reader.read()
+-      lastWriteTime = reader.read()
+-      changeTime = reader.read()
+-      allocationSize = reader.read()
+-      endOfFile = reader.read()
+-      fileAttributes = reader.read()
++      header = try reader.read()
++      structureSize = try reader.read()
++      flags = try reader.read()
++      reserved = try reader.read()
++      creationTime = try reader.read()
++      lastAccessTime = try reader.read()
++      lastWriteTime = try reader.read()
++      changeTime = try reader.read()
++      allocationSize = try reader.read()
++      endOfFile = try reader.read()
++      fileAttributes = try reader.read()
+     }
+   }
+ 
+diff --git a/Sources/SMBClient/Messages/Create.swift b/Sources/SMBClient/Messages/Create.swift
+index 943a8a1..719a59b 100644
+--- a/Sources/SMBClient/Messages/Create.swift
++++ b/Sources/SMBClient/Messages/Create.swift
+@@ -114,28 +114,28 @@ public enum Create {
+     public let createContextsLength: UInt32
+     public let buffer: Data
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
+-
+-      structureSize = reader.read()
+-      oplockLevel = reader.read()
+-      flags = Flags(rawValue: reader.read())
+-      createAction = reader.read()
+-      creationTime = reader.read()
+-      lastAccessTime = reader.read()
+-      lastWriteTime = reader.read()
+-      changeTime = reader.read()
+-      allocationSize = reader.read()
+-      endOfFile = reader.read()
+-      fileAttributes = FileAttributes(rawValue: reader.read())
+-      reserved2 = reader.read()
+-      fileId = reader.read(count: 16)
+-      createContextsOffset = reader.read()
+-      createContextsLength = reader.read()
++      header = try reader.read()
++
++      structureSize = try reader.read()
++      oplockLevel = try reader.read()
++      flags = try Flags(rawValue: reader.read())
++      createAction = try reader.read()
++      creationTime = try reader.read()
++      lastAccessTime = try reader.read()
++      lastWriteTime = try reader.read()
++      changeTime = try reader.read()
++      allocationSize = try reader.read()
++      endOfFile = try reader.read()
++      fileAttributes = try FileAttributes(rawValue: reader.read())
++      reserved2 = try reader.read()
++      fileId = try reader.read(count: 16)
++      createContextsOffset = try reader.read()
++      createContextsLength = try reader.read()
+       if createContextsOffset > 0 {
+-        buffer = reader.read(from: Int(createContextsOffset), count: Int(createContextsLength))
++        buffer = try reader.read(from: Int(createContextsOffset), count: Int(createContextsLength))
+       } else {
+         buffer = Data()
+       }
+diff --git a/Sources/SMBClient/Messages/Echo.swift b/Sources/SMBClient/Messages/Echo.swift
+index e2336db..830818d 100644
+--- a/Sources/SMBClient/Messages/Echo.swift
++++ b/Sources/SMBClient/Messages/Echo.swift
+@@ -44,13 +44,13 @@ public enum Echo {
+     public let structureSize: UInt16
+     public let reserved: UInt16
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
++      header = try reader.read()
+ 
+-      structureSize = reader.read()
+-      reserved = reader.read()
++      structureSize = try reader.read()
++      reserved = try reader.read()
+     }
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/Errors/ErrorResponse.swift b/Sources/SMBClient/Messages/Errors/ErrorResponse.swift
+index 9fcbae2..6873b50 100644
+--- a/Sources/SMBClient/Messages/Errors/ErrorResponse.swift
++++ b/Sources/SMBClient/Messages/Errors/ErrorResponse.swift
+@@ -6,13 +6,13 @@ public struct ErrorResponse: Error {
+   public let errorContextCount: UInt8
+   public let reserved: UInt8
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    header = reader.read()
+-    structureSize = reader.read()
+-    errorContextCount = reader.read()
+-    reserved = reader.read()
++    header = try reader.read()
++    structureSize = try reader.read()
++    errorContextCount = try reader.read()
++    reserved = try reader.read()
+   }
+ }
+ 
+diff --git a/Sources/SMBClient/Messages/Errors/ResponseDecodingError.swift b/Sources/SMBClient/Messages/Errors/ResponseDecodingError.swift
+new file mode 100644
+index 0000000..42f64c8
+--- /dev/null
++++ b/Sources/SMBClient/Messages/Errors/ResponseDecodingError.swift
+@@ -0,0 +1,26 @@
++import Foundation
++
++// RUMSKROT-HARDEN: the typed error every response parser throws when the
++// bytes a server sent cannot be what it claims to be.
++public enum ResponseDecodingError: Error, Equatable, Sendable {
++  /// A field, or a buffer an offset/length pair points at, runs past the
++  /// end of the bytes that were actually received.
++  case outOfBounds(offset: Int, count: Int, available: Int)
++  /// A field holds a value the protocol does not allow here.
++  case invalidValue(field: String, value: UInt64)
++  /// A compound or multi-part reply did not carry the parts it promised.
++  case missingResponse(expected: Int, received: Int)
++}
++
++extension ResponseDecodingError: LocalizedError {
++  public var errorDescription: String? {
++    switch self {
++    case let .outOfBounds(offset, count, available):
++      return "Malformed response: \(count) bytes at offset \(offset) exceed the \(available) bytes received"
++    case let .invalidValue(field, value):
++      return "Malformed response: invalid \(field) (\(value))"
++    case let .missingResponse(expected, received):
++      return "Malformed response: expected \(expected) replies, received \(received)"
++    }
++  }
++}
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileAccessInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileAccessInformation.swift
+index f5b8d28..65b63a6 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileAccessInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileAccessInformation.swift
+@@ -3,14 +3,14 @@ import Foundation
+ public struct FileAccessInformation {
+   public let accessFlags: AccessMask
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+-    accessFlags = AccessMask(rawValue: reader.read())
++    accessFlags = try AccessMask(rawValue: reader.read())
+   }
+ }
+ 
+ extension ByteReader {
+-  func read() -> FileAccessInformation {
+-    FileAccessInformation(data: read(count: 4))
++  func read() throws -> FileAccessInformation {
++    try FileAccessInformation(data: read(count: 4))
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileAlignmentInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileAlignmentInformation.swift
+index 56ec972..b4a9735 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileAlignmentInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileAlignmentInformation.swift
+@@ -22,14 +22,14 @@ public struct FileAlignmentInformation {
+     public static let fiveTwelve = AlignmentRequirement(rawValue: 0x000001FF)
+   }
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+-    alignmentRequirement = AlignmentRequirement(rawValue: reader.read())
++    alignmentRequirement = try AlignmentRequirement(rawValue: reader.read())
+   }
+ }
+ 
+ extension ByteReader {
+-  func read() -> FileAlignmentInformation {
+-    FileAlignmentInformation(data: read(count: 4))
++  func read() throws -> FileAlignmentInformation {
++    try FileAlignmentInformation(data: read(count: 4))
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileAllInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileAllInformation.swift
+index 07f773e..1003523 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileAllInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileAllInformation.swift
+@@ -11,17 +11,17 @@ public struct FileAllInformation {
+   public let alignmentInformation: FileAlignmentInformation
+   public let nameInformation: FileNameInformation
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    basicInformation = reader.read()
+-    standardInformation = reader.read()
+-    internalInformation = reader.read()
+-    eaInformation = reader.read()
+-    accessInformation = reader.read()
+-    positionInformation = reader.read()
+-    modeInformation = reader.read()
+-    alignmentInformation = reader.read()
+-    nameInformation = reader.read()
++    basicInformation = try reader.read()
++    standardInformation = try reader.read()
++    internalInformation = try reader.read()
++    eaInformation = try reader.read()
++    accessInformation = try reader.read()
++    positionInformation = try reader.read()
++    modeInformation = try reader.read()
++    alignmentInformation = try reader.read()
++    nameInformation = try reader.read()
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileBasicInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileBasicInformation.swift
+index ad0403e..fb1ef0c 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileBasicInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileBasicInformation.swift
+@@ -25,15 +25,15 @@ public struct FileBasicInformation: FileInformationClass {
+     reserved = 0
+   }
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+     
+-    creationTime = reader.read()
+-    lastAccessTime = reader.read()
+-    lastWriteTime = reader.read()
+-    changeTime = reader.read()
+-    fileAttributes = FileAttributes(rawValue: reader.read())
+-    reserved = reader.read()
++    creationTime = try reader.read()
++    lastAccessTime = try reader.read()
++    lastWriteTime = try reader.read()
++    changeTime = try reader.read()
++    fileAttributes = try FileAttributes(rawValue: reader.read())
++    reserved = try reader.read()
+   }
+ 
+   public func encoded() -> Data {
+@@ -51,7 +51,7 @@ public struct FileBasicInformation: FileInformationClass {
+ }
+ 
+ extension ByteReader {
+-  func read() -> FileBasicInformation {
+-    FileBasicInformation(data: read(count: 40))
++  func read() throws -> FileBasicInformation {
++    try FileBasicInformation(data: read(count: 40))
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileDirectoryInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileDirectoryInformation.swift
+index 84e963b..a9f1f98 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileDirectoryInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileDirectoryInformation.swift
+@@ -13,21 +13,21 @@ public struct FileDirectoryInformation {
+   public let fileNameLength: UInt32
+   public let fileName: String
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    nextEntryOffset = reader.read()
+-    fileIndex = reader.read()
+-    creationTime = reader.read()
+-    lastAccessTime = reader.read()
+-    lastWriteTime = reader.read()
+-    changeTime = reader.read()
+-    endOfFile = reader.read()
+-    allocationSize = reader.read()
+-    fileAttributes = FileAttributes(rawValue: reader.read())
+-    fileNameLength = reader.read()
++    nextEntryOffset = try reader.read()
++    fileIndex = try reader.read()
++    creationTime = try reader.read()
++    lastAccessTime = try reader.read()
++    lastWriteTime = try reader.read()
++    changeTime = try reader.read()
++    endOfFile = try reader.read()
++    allocationSize = try reader.read()
++    fileAttributes = try FileAttributes(rawValue: reader.read())
++    fileNameLength = try reader.read()
+ 
+-    let fileNameData = reader.read(count: Int(fileNameLength))
++    let fileNameData = try reader.read(count: Int(fileNameLength))
+     fileName = String(data: fileNameData, encoding: .utf16LittleEndian) ?? fileNameData.hex
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileEaInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileEaInformation.swift
+index 89007ae..5ac36d0 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileEaInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileEaInformation.swift
+@@ -3,14 +3,14 @@ import Foundation
+ public struct FileEaInformation {
+   public let eaSize: UInt32
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+-    eaSize = reader.read()
++    eaSize = try reader.read()
+   }
+ }
+ 
+ extension ByteReader {
+-  func read() -> FileEaInformation {
+-    FileEaInformation(data: read(count: 4))
++  func read() throws -> FileEaInformation {
++    try FileEaInformation(data: read(count: 4))
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileIdBothDirectoryInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileIdBothDirectoryInformation.swift
+index 0d1fad8..4682079 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileIdBothDirectoryInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileIdBothDirectoryInformation.swift
+@@ -19,30 +19,30 @@ public struct FileIdBothDirectoryInformation {
+   public let fileId: Data
+   public let fileName: String
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    nextEntryOffset = reader.read()
+-    fileIndex = reader.read()
+-    creationTime = reader.read()
+-    lastAccessTime = reader.read()
+-    lastWriteTime = reader.read()
+-    changeTime = reader.read()
+-    endOfFile = reader.read()
+-    allocationSize = reader.read()
+-    fileAttributes = FileAttributes(rawValue: reader.read())
+-    fileNameLength = reader.read()
+-    eaSize = reader.read()
+-    shortNameLength = reader.read()
+-    reserved = reader.read()
++    nextEntryOffset = try reader.read()
++    fileIndex = try reader.read()
++    creationTime = try reader.read()
++    lastAccessTime = try reader.read()
++    lastWriteTime = try reader.read()
++    changeTime = try reader.read()
++    endOfFile = try reader.read()
++    allocationSize = try reader.read()
++    fileAttributes = try FileAttributes(rawValue: reader.read())
++    fileNameLength = try reader.read()
++    eaSize = try reader.read()
++    shortNameLength = try reader.read()
++    reserved = try reader.read()
+ 
+-    let shortNameData = reader.read(count: 24)
++    let shortNameData = try reader.read(count: 24)
+     shortName = String(data: shortNameData, encoding: .utf16LittleEndian) ?? shortNameData.hex
+ 
+-    reserved2 = reader.read()
+-    fileId = reader.read(count: 8)
++    reserved2 = try reader.read()
++    fileId = try reader.read(count: 8)
+ 
+-    let fileNameData = reader.read(count: Int(fileNameLength))
++    let fileNameData = try reader.read(count: Int(fileNameLength))
+     fileName = String(data: fileNameData, encoding: .utf16LittleEndian) ?? fileNameData.hex
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileInternalInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileInternalInformation.swift
+index 538979b..5b786ad 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileInternalInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileInternalInformation.swift
+@@ -3,14 +3,14 @@ import Foundation
+ public struct FileInternalInformation {
+   public let indexNumber: UInt64
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+-    indexNumber = reader.read()
++    indexNumber = try reader.read()
+   }
+ }
+ 
+ extension ByteReader {
+-  func read() -> FileInternalInformation {
+-    FileInternalInformation(data: read(count: 8))
++  func read() throws -> FileInternalInformation {
++    try FileInternalInformation(data: read(count: 8))
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileModeInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileModeInformation.swift
+index c0ec75c..74f543d 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileModeInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileModeInformation.swift
+@@ -18,14 +18,14 @@ public struct FileModeInformation {
+     public static let deleteOnClose = Mode(rawValue: 0x00001000)
+   }
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+-    mode = Mode(rawValue: reader.read())
++    mode = try Mode(rawValue: reader.read())
+   }
+ }
+ 
+ extension ByteReader {
+-  func read() -> FileModeInformation {
+-    FileModeInformation(data: read(count: 4))
++  func read() throws -> FileModeInformation {
++    try FileModeInformation(data: read(count: 4))
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileNameInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileNameInformation.swift
+index 712d827..6aa327f 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileNameInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileNameInformation.swift
+@@ -4,12 +4,12 @@ public struct FileNameInformation {
+   public let fileNameLength: UInt32
+   public let fileName: String
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    fileNameLength = reader.read()
++    fileNameLength = try reader.read()
+ 
+-    let fileNameData = reader.read(count: Int(fileNameLength))
++    let fileNameData = try reader.read(count: Int(fileNameLength))
+     fileName = String(data: fileNameData, encoding: .utf16LittleEndian) ?? fileNameData.hex
+   }
+ 
+@@ -20,9 +20,9 @@ public struct FileNameInformation {
+ }
+ 
+ extension ByteReader {
+-  func read() -> FileNameInformation {
+-    let fileNameLength: UInt32 = read()
+-    let fileNameData = read(count: Int(fileNameLength))
++  func read() throws -> FileNameInformation {
++    let fileNameLength: UInt32 = try read()
++    let fileNameData = try read(count: Int(fileNameLength))
+     let fileName = String(data: fileNameData, encoding: .utf16LittleEndian) ?? fileNameData.hex
+     return FileNameInformation(fileNameLength: fileNameLength, fileName: fileName)
+   }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FilePositionInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FilePositionInformation.swift
+index d4ccfc7..3dbe0f2 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FilePositionInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FilePositionInformation.swift
+@@ -3,14 +3,14 @@ import Foundation
+ public struct FilePositionInformation {
+   public let currentByteOffset: UInt64
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+-    currentByteOffset = reader.read()
++    currentByteOffset = try reader.read()
+   }
+ }
+ 
+ extension ByteReader {
+-  func read() -> FilePositionInformation {
+-    return FilePositionInformation(data: read(count: 8))
++  func read() throws -> FilePositionInformation {
++    return try FilePositionInformation(data: read(count: 8))
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileInformationClasses/FileStandardInformation.swift b/Sources/SMBClient/Messages/FileInformationClasses/FileStandardInformation.swift
+index 907b4e6..a4c01ab 100644
+--- a/Sources/SMBClient/Messages/FileInformationClasses/FileStandardInformation.swift
++++ b/Sources/SMBClient/Messages/FileInformationClasses/FileStandardInformation.swift
+@@ -8,20 +8,20 @@ public struct FileStandardInformation {
+   public let directory: Bool
+   public let reserved: UInt16
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    allocationSize = reader.read()
+-    endOfFile = reader.read()
+-    numberOfLinks = reader.read()
+-    deletePending = reader.read()
+-    directory = reader.read()
+-    reserved = reader.read()
++    allocationSize = try reader.read()
++    endOfFile = try reader.read()
++    numberOfLinks = try reader.read()
++    deletePending = try reader.read()
++    directory = try reader.read()
++    reserved = try reader.read()
+   }
+ }
+ 
+ extension ByteReader {
+-  func read() -> FileStandardInformation {
+-    FileStandardInformation(data: read(count: 24))
++  func read() throws -> FileStandardInformation {
++    try FileStandardInformation(data: read(count: 24))
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsDeviceInformation.swift b/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsDeviceInformation.swift
+index fe34c09..e9b0eb1 100644
+--- a/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsDeviceInformation.swift
++++ b/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsDeviceInformation.swift
+@@ -30,10 +30,10 @@ public struct FileFsDeviceInformation {
+     public static let portableDevice = Characteristics(rawValue: 0x00004000)
+   }
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    deviceType = reader.read()
+-    characteristics = Characteristics(rawValue: reader.read())
++    deviceType = try reader.read()
++    characteristics = try Characteristics(rawValue: reader.read())
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsLabelInformation.swift b/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsLabelInformation.swift
+index 16af557..ce68ab5 100644
+--- a/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsLabelInformation.swift
++++ b/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsLabelInformation.swift
+@@ -4,11 +4,11 @@ public struct FileFsLabelInformation {
+   public let volumeLabelLength: UInt32
+   public let volumeLabel: String
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    volumeLabelLength = reader.read()
+-    let volumeLabelData = reader.read(count: Int(volumeLabelLength))
++    volumeLabelLength = try reader.read()
++    let volumeLabelData = try reader.read(count: Int(volumeLabelLength))
+     volumeLabel = String(data: volumeLabelData, encoding: .utf16LittleEndian) ?? volumeLabelData.hex
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsSizeInformation.swift b/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsSizeInformation.swift
+index c2eef47..bc277f7 100644
+--- a/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsSizeInformation.swift
++++ b/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsSizeInformation.swift
+@@ -6,12 +6,12 @@ public struct FileFsSizeInformation {
+   public let sectorsPerAllocationUnit: UInt32
+   public let bytesPerSector: UInt32
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    totalAllocationUnits = reader.read()
+-    availableAllocationUnits = reader.read()
+-    sectorsPerAllocationUnit = reader.read()
+-    bytesPerSector = reader.read()
++    totalAllocationUnits = try reader.read()
++    availableAllocationUnits = try reader.read()
++    sectorsPerAllocationUnit = try reader.read()
++    bytesPerSector = try reader.read()
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsVolumeInformation.swift b/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsVolumeInformation.swift
+index 9f0c163..0d9c14c 100644
+--- a/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsVolumeInformation.swift
++++ b/Sources/SMBClient/Messages/FileSystemInformationClasses/FileFsVolumeInformation.swift
+@@ -8,15 +8,16 @@ public struct FileFsVolumeInformation {
+   public let reserved: UInt8
+   public let volumeLabel: String
+ 
+-  public init(data: Data) {
++  public init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    volumeCreationTime = reader.read()
+-    volumeSerialNumber = reader.read()
+-    volumeLabelLength = reader.read()
+-    supportsObjects = reader.read() == 1
+-    reserved = reader.read()
+-    let volumeLabelData = reader.read(count: Int(volumeLabelLength))
++    volumeCreationTime = try reader.read()
++    volumeSerialNumber = try reader.read()
++    volumeLabelLength = try reader.read()
++    // RUMSKROT-HARDEN: a one-byte BOOLEAN; `read() == 1` inferred Int and consumed eight.
++    supportsObjects = try (reader.read() as UInt8) == 1
++    reserved = try reader.read()
++    let volumeLabelData = try reader.read(count: Int(volumeLabelLength))
+     volumeLabel = String(data: volumeLabelData, encoding: .utf16LittleEndian) ?? volumeLabelData.hex
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/Flush.swift b/Sources/SMBClient/Messages/Flush.swift
+index 178a96a..85e772e 100644
+--- a/Sources/SMBClient/Messages/Flush.swift
++++ b/Sources/SMBClient/Messages/Flush.swift
+@@ -51,12 +51,12 @@ public enum Flush {
+     public let structureSize: UInt16
+     public let reserved: UInt16
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = Header(data: data)
+-      structureSize = reader.read()
+-      reserved = reader.read()
++      header = try Header(data: data)
++      structureSize = try reader.read()
++      reserved = try reader.read()
+     }
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/Header.swift b/Sources/SMBClient/Messages/Header.swift
+index ca05a7f..af1a9a2 100644
+--- a/Sources/SMBClient/Messages/Header.swift
++++ b/Sources/SMBClient/Messages/Header.swift
+@@ -40,22 +40,22 @@ public struct Header {
+     self.signature = Data(count: 16)
+   }
+ 
+-  init(data: Data) {
++  init(data: Data) throws {
+     let reader = ByteReader(data)
+ 
+-    protocolId = reader.read()
+-    structureSize = reader.read()
+-    creditCharge = reader.read()
+-    status = reader.read()
+-    command = reader.read()
+-    creditRequestResponse = reader.read()
+-    flags = Flags(rawValue: reader.read())
+-    nextCommand = reader.read()
+-    messageId = reader.read()
+-    reserved = reader.read()
+-    treeId = reader.read()
+-    sessionId = reader.read()
+-    signature = reader.read(count: 16)
++    protocolId = try reader.read()
++    structureSize = try reader.read()
++    creditCharge = try reader.read()
++    status = try reader.read()
++    command = try reader.read()
++    creditRequestResponse = try reader.read()
++    flags = try Flags(rawValue: reader.read())
++    nextCommand = try reader.read()
++    messageId = try reader.read()
++    reserved = try reader.read()
++    treeId = try reader.read()
++    sessionId = try reader.read()
++    signature = try reader.read(count: 16)
+   }
+ 
+   public func encoded() -> Data {
+@@ -119,7 +119,7 @@ public struct Header {
+ }
+ 
+ extension ByteReader {
+-  func read() -> Header {
+-    Header(data: read(count: 64))
++  func read() throws -> Header {
++    try Header(data: read(count: 64))
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/IOCtl.swift b/Sources/SMBClient/Messages/IOCtl.swift
+index da7debc..19fdc85 100644
+--- a/Sources/SMBClient/Messages/IOCtl.swift
++++ b/Sources/SMBClient/Messages/IOCtl.swift
+@@ -91,22 +91,22 @@ public enum IOCtl {
+     public let reserved2: UInt32
+     public let buffer: Data
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
++      header = try reader.read()
+ 
+-      structureSize = reader.read()
+-      reserved = reader.read()
+-      ctlCode = reader.read()
+-      fileId = reader.read(count: 16)
+-      inputOffset = reader.read()
+-      inputCount = reader.read()
+-      outputOffset = reader.read()
+-      outputCount = reader.read()
+-      flags = Flags(rawValue: reader.read())
+-      reserved2 = reader.read()
+-      buffer = reader.read(count: Int(outputCount))
++      structureSize = try reader.read()
++      reserved = try reader.read()
++      ctlCode = try reader.read()
++      fileId = try reader.read(count: 16)
++      inputOffset = try reader.read()
++      inputCount = try reader.read()
++      outputOffset = try reader.read()
++      outputCount = try reader.read()
++      flags = try Flags(rawValue: reader.read())
++      reserved2 = try reader.read()
++      buffer = try reader.read(count: Int(outputCount))
+     }
+   }
+ 
+diff --git a/Sources/SMBClient/Messages/Logoff.swift b/Sources/SMBClient/Messages/Logoff.swift
+index aabc481..a95a8a6 100644
+--- a/Sources/SMBClient/Messages/Logoff.swift
++++ b/Sources/SMBClient/Messages/Logoff.swift
+@@ -43,12 +43,12 @@ public enum Logoff {
+     public let structureSize: UInt16
+     public let reserved: UInt16
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
+-      structureSize = reader.read()
+-      reserved = reader.read()
++      header = try reader.read()
++      structureSize = try reader.read()
++      reserved = try reader.read()
+     }
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/Message.swift b/Sources/SMBClient/Messages/Message.swift
+index 9186b49..a73f96b 100644
+--- a/Sources/SMBClient/Messages/Message.swift
++++ b/Sources/SMBClient/Messages/Message.swift
+@@ -8,6 +8,6 @@ public enum Message {
+ 
+   public protocol Response {
+     var header: Header { get }
+-    init(data: Data)
++    init(data: Data) throws
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/Negotiate.swift b/Sources/SMBClient/Messages/Negotiate.swift
+index 94229b3..4231ee0 100644
+--- a/Sources/SMBClient/Messages/Negotiate.swift
++++ b/Sources/SMBClient/Messages/Negotiate.swift
+@@ -85,26 +85,26 @@ public enum Negotiate {
+     public let negotiateContextOffset: UInt32
+     public let securityBuffer: Data
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
+-
+-      structureSize = reader.read()
+-      securityMode = SecurityMode(rawValue: reader.read())
+-      dialectRevision = reader.read()
+-      negotiateContextCount = reader.read()
+-      serverGuid = reader.read()
+-      capabilities = Capabilities(rawValue: reader.read())
+-      maxTransactSize = reader.read()
+-      maxReadSize = reader.read()
+-      maxWriteSize = reader.read()
+-      systemTime = reader.read()
+-      serverStartTime = reader.read()
+-      securityBufferOffset = reader.read()
+-      securityBufferLength = reader.read()
+-      negotiateContextOffset = reader.read()
+-      securityBuffer = reader.read(from: Int(securityBufferOffset), count: Int(securityBufferLength))
++      header = try reader.read()
++
++      structureSize = try reader.read()
++      securityMode = try SecurityMode(rawValue: reader.read())
++      dialectRevision = try reader.read()
++      negotiateContextCount = try reader.read()
++      serverGuid = try reader.read()
++      capabilities = try Capabilities(rawValue: reader.read())
++      maxTransactSize = try reader.read()
++      maxReadSize = try reader.read()
++      maxWriteSize = try reader.read()
++      systemTime = try reader.read()
++      serverStartTime = try reader.read()
++      securityBufferOffset = try reader.read()
++      securityBufferLength = try reader.read()
++      negotiateContextOffset = try reader.read()
++      securityBuffer = try reader.read(from: Int(securityBufferOffset), count: Int(securityBufferLength))
+     }
+   }
+ 
+diff --git a/Sources/SMBClient/Messages/QueryDirectory+CustomDebugStringConvertible.swift b/Sources/SMBClient/Messages/QueryDirectory+CustomDebugStringConvertible.swift
+index 6ff7d5d..8f90295 100644
+--- a/Sources/SMBClient/Messages/QueryDirectory+CustomDebugStringConvertible.swift
++++ b/Sources/SMBClient/Messages/QueryDirectory+CustomDebugStringConvertible.swift
+@@ -27,7 +27,7 @@ extension QueryDirectory.Response: CustomDebugStringConvertible {
+       Blob Offset: \(outputBufferOffset)
+       Blob Length: \(outputBufferLength)
+       Info:
+-    \(files().map { "\($0)".split(separator: "\n").map { "  \($0)" }.joined(separator: "\n") }.joined(separator: "\n"))
++    \(((try? files()) ?? []).map { "\($0)".split(separator: "\n").map { "  \($0)" }.joined(separator: "\n") }.joined(separator: "\n"))
+     """
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/QueryDirectory.swift b/Sources/SMBClient/Messages/QueryDirectory.swift
+index 29b33ac..d0d97b3 100644
+--- a/Sources/SMBClient/Messages/QueryDirectory.swift
++++ b/Sources/SMBClient/Messages/QueryDirectory.swift
+@@ -76,26 +76,34 @@ public enum QueryDirectory {
+     public let outputBufferLength: UInt32
+     public let buffer: Data
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
++      header = try reader.read()
+ 
+-      structureSize = reader.read()
+-      outputBufferOffset = reader.read()
+-      outputBufferLength = reader.read()
+-      buffer = reader.read(from: Int(outputBufferOffset), count: Int(outputBufferLength))
++      structureSize = try reader.read()
++      outputBufferOffset = try reader.read()
++      outputBufferLength = try reader.read()
++      buffer = try reader.read(from: Int(outputBufferOffset), count: Int(outputBufferLength))
+     }
+ 
+-    public func files() -> [FileDirectoryInformation] {
++    public func files() throws -> [FileDirectoryInformation] {
+       var files = [FileDirectoryInformation]()
+       if outputBufferLength > 0 {
+         var data = Data(buffer)
+         repeat {
+-          let fileInformation = FileDirectoryInformation(data: data)
++          let fileInformation = try FileDirectoryInformation(data: data)
+           files.append(fileInformation)
+-          data = Data(data[(fileInformation.nextEntryOffset)...])
+-        } while files.last!.nextEntryOffset != 0
++          // RUMSKROT-HARDEN: the next entry must lie inside this buffer.
++          guard Int(fileInformation.nextEntryOffset) <= data.count else {
++            throw ResponseDecodingError.outOfBounds(
++              offset: Int(fileInformation.nextEntryOffset),
++              count: 0,
++              available: data.count
++            )
++          }
++          data = Data(data.dropFirst(Int(fileInformation.nextEntryOffset)))
++        } while files.last?.nextEntryOffset ?? 0 != 0
+       }
+ 
+       return files
+diff --git a/Sources/SMBClient/Messages/QueryInfo.swift b/Sources/SMBClient/Messages/QueryInfo.swift
+index 17f1969..255d634 100644
+--- a/Sources/SMBClient/Messages/QueryInfo.swift
++++ b/Sources/SMBClient/Messages/QueryInfo.swift
+@@ -78,14 +78,14 @@ public enum QueryInfo {
+     public let outputBufferLength: UInt32
+     public let buffer: Data
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+       
+-      header = reader.read()
+-      structureSize = reader.read()
+-      outputBufferOffset = reader.read()
+-      outputBufferLength = reader.read()
+-      buffer = reader.read(count: Int(outputBufferLength))
++      header = try reader.read()
++      structureSize = try reader.read()
++      outputBufferOffset = try reader.read()
++      outputBufferLength = try reader.read()
++      buffer = try reader.read(count: Int(outputBufferLength))
+     }
+   }
+ 
+diff --git a/Sources/SMBClient/Messages/Read.swift b/Sources/SMBClient/Messages/Read.swift
+index 57b5398..b93ad8f 100644
+--- a/Sources/SMBClient/Messages/Read.swift
++++ b/Sources/SMBClient/Messages/Read.swift
+@@ -84,19 +84,19 @@ public enum Read {
+     public let reserved2: UInt32
+     public let buffer: Data
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
+-      structureSize = reader.read()
++      header = try reader.read()
++      structureSize = try reader.read()
+ 
+       if header.status != 0xc0000011 {
+-        dataOffset = reader.read()
+-        reserved = reader.read()
+-        dataLength = reader.read()
+-        dataRemaining = reader.read()
+-        reserved2 = reader.read()
+-        buffer = reader.read(from: Int(dataOffset), count: Int(dataLength))
++        dataOffset = try reader.read()
++        reserved = try reader.read()
++        dataLength = try reader.read()
++        dataRemaining = try reader.read()
++        reserved2 = try reader.read()
++        buffer = try reader.read(from: Int(dataOffset), count: Int(dataLength))
+       } else {
+         dataOffset = 0
+         reserved = 0
+diff --git a/Sources/SMBClient/Messages/SessionSetup.swift b/Sources/SMBClient/Messages/SessionSetup.swift
+index 54abcf2..c11fc1f 100644
+--- a/Sources/SMBClient/Messages/SessionSetup.swift
++++ b/Sources/SMBClient/Messages/SessionSetup.swift
+@@ -71,16 +71,16 @@ public enum SessionSetup {
+     public let securityBufferLength: UInt16
+     public let buffer: Data
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
++      header = try reader.read()
+ 
+-      structureSize = reader.read()
+-      sessionFlags = SessionFlags(rawValue: reader.read())
+-      securityBufferOffset = reader.read()
+-      securityBufferLength = reader.read()
+-      buffer = reader.read(from: Int(securityBufferOffset), count: Int(securityBufferLength))
++      structureSize = try reader.read()
++      sessionFlags = try SessionFlags(rawValue: reader.read())
++      securityBufferOffset = try reader.read()
++      securityBufferLength = try reader.read()
++      buffer = try reader.read(from: Int(securityBufferOffset), count: Int(securityBufferLength))
+     }
+   }
+ 
+diff --git a/Sources/SMBClient/Messages/SetInfo.swift b/Sources/SMBClient/Messages/SetInfo.swift
+index 69d0e80..d3ae4b7 100644
+--- a/Sources/SMBClient/Messages/SetInfo.swift
++++ b/Sources/SMBClient/Messages/SetInfo.swift
+@@ -79,11 +79,11 @@ public enum SetInfo {
+     public let header: Header
+     public let structureSize: UInt16
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+       
+-      header = reader.read()
+-      structureSize = reader.read()
++      header = try reader.read()
++      structureSize = try reader.read()
+     }
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/TreeConnect.swift b/Sources/SMBClient/Messages/TreeConnect.swift
+index 40ec0f4..07f237e 100644
+--- a/Sources/SMBClient/Messages/TreeConnect.swift
++++ b/Sources/SMBClient/Messages/TreeConnect.swift
+@@ -59,17 +59,17 @@ public enum TreeConnect {
+     public let capabilities: Capabilities
+     public let maximalAccess: UInt32
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
++      header = try reader.read()
+ 
+-      structureSize = reader.read()
+-      shareType = reader.read()
+-      reserved = reader.read()
+-      shareFlags = ShareFlags(rawValue: reader.read())
+-      capabilities = Capabilities(rawValue: reader.read())
+-      maximalAccess = reader.read()
++      structureSize = try reader.read()
++      shareType = try reader.read()
++      reserved = try reader.read()
++      shareFlags = try ShareFlags(rawValue: reader.read())
++      capabilities = try Capabilities(rawValue: reader.read())
++      maximalAccess = try reader.read()
+     }
+   }
+ 
+diff --git a/Sources/SMBClient/Messages/TreeDisconnect.swift b/Sources/SMBClient/Messages/TreeDisconnect.swift
+index ace3b81..9d03afd 100644
+--- a/Sources/SMBClient/Messages/TreeDisconnect.swift
++++ b/Sources/SMBClient/Messages/TreeDisconnect.swift
+@@ -44,12 +44,12 @@ public enum TreeDisconnect {
+     public let structureSize: UInt16
+     public let reserved: UInt16
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+       
+-      header = reader.read()
+-      structureSize = reader.read()
+-      reserved = reader.read()
++      header = try reader.read()
++      structureSize = try reader.read()
++      reserved = try reader.read()
+     }
+   }
+ }
+diff --git a/Sources/SMBClient/Messages/Write.swift b/Sources/SMBClient/Messages/Write.swift
+index 624d175..afa8ce0 100644
+--- a/Sources/SMBClient/Messages/Write.swift
++++ b/Sources/SMBClient/Messages/Write.swift
+@@ -80,17 +80,17 @@ public enum Write {
+     public let writeChannelInfoOffset: UInt16
+     public let writeChannelInfoLength: UInt16
+ 
+-    public init(data: Data) {
++    public init(data: Data) throws {
+       let reader = ByteReader(data)
+ 
+-      header = reader.read()
++      header = try reader.read()
+ 
+-      structureSize = reader.read()
+-      reserved = reader.read()
+-      count = reader.read()
+-      remaining = reader.read()
+-      writeChannelInfoOffset = reader.read()
+-      writeChannelInfoLength = reader.read()
++      structureSize = try reader.read()
++      reserved = try reader.read()
++      count = try reader.read()
++      remaining = try reader.read()
++      writeChannelInfoOffset = try reader.read()
++      writeChannelInfoLength = try reader.read()
+     }
+   }
+ 
+diff --git a/Sources/SMBClient/Misc/Data.swift b/Sources/SMBClient/Misc/Data.swift
+index 8c7bf64..b72e3e1 100644
+--- a/Sources/SMBClient/Misc/Data.swift
++++ b/Sources/SMBClient/Misc/Data.swift
+@@ -7,7 +7,8 @@ extension Data {
+   }
+ 
+   func to<T>(type: T.Type) -> T {
+-    return self.withUnsafeBytes { $0.load(as: T.self) }
++    // RUMSKROT-HARDEN: slices are rarely aligned for T; `load` requires it.
++    return self.withUnsafeBytes { $0.loadUnaligned(as: T.self) }
+   }
+ }
+ 
+diff --git a/Sources/SMBClient/SMBClient.swift b/Sources/SMBClient/SMBClient.swift
+index 382a4c7..0fd36d9 100644
+--- a/Sources/SMBClient/SMBClient.swift
++++ b/Sources/SMBClient/SMBClient.swift
+@@ -119,7 +119,7 @@ public class SMBClient {
+ 
+   public func fileInfo(path: String) async throws -> FileAllInformation {
+     let response = try await session.queryInfo(path: Pathname.normalize(path))
+-    return FileAllInformation(data: response.buffer)
++    return try FileAllInformation(data: response.buffer)
+   }
+ 
+   public func download(path: String) async throws -> Data {
+@@ -197,13 +197,15 @@ public class SMBClient {
+   public func availableSpace() async throws -> UInt64 {
+     let response = try await session.queryInfo(path: "", infoType: .fileSystem, fileInfoClass: .fileFsSizeInformation)
+ 
+-    let sizeInformation = FileFsSizeInformation(data: response.buffer)
++    let sizeInformation = try FileFsSizeInformation(data: response.buffer)
+     let availableAllocationUnits = sizeInformation.availableAllocationUnits
+     let sectorsPerAllocationUnit = sizeInformation.sectorsPerAllocationUnit
+     let bytesPerSector = sizeInformation.bytesPerSector
+ 
+-    let bytesPerAllocationUnit = UInt64(sectorsPerAllocationUnit * bytesPerSector)
+-    let availableSpaceBytes = availableAllocationUnits * bytesPerAllocationUnit
++    // RUMSKROT-HARDEN: server-reported factors; saturate rather than trap on overflow.
++    let bytesPerAllocationUnit = UInt64(sectorsPerAllocationUnit) * UInt64(bytesPerSector)
++    let (product, overflow) = availableAllocationUnits.multipliedReportingOverflow(by: bytesPerAllocationUnit)
++    let availableSpaceBytes = overflow ? UInt64.max : product
+ 
+     return availableSpaceBytes
+   }
+diff --git a/Sources/SMBClient/Session.swift b/Sources/SMBClient/Session.swift
+index d71bcb6..e4413c8 100644
+--- a/Sources/SMBClient/Session.swift
++++ b/Sources/SMBClient/Session.swift
+@@ -113,7 +113,7 @@ public class Session {
+     let response = try await send(request)
+ 
+     if NTStatus(response.header.status) == .moreProcessingRequired {
+-      let challengeMessage = NTLM.ChallengeMessage(data: response.buffer)
++      let challengeMessage = try NTLM.ChallengeMessage(data: response.buffer)
+ 
+       let signingKey = Crypto.randomBytes(count: 16)
+       let authenticateMessage = challengeMessage.authenticateMessage(
+@@ -178,8 +178,8 @@ public class Session {
+     try await session.bind(fileId: createResponse.fileId)
+     let ioCtlResponse = try await session.netShareEnum(fileId: createResponse.fileId)
+ 
+-    let rpcResponse = DCERPC.Response(data: ioCtlResponse.buffer)
+-    let netShareEnumResponse = NetShareEnumResponse(data: rpcResponse.stub)
++    let rpcResponse = try DCERPC.Response(data: ioCtlResponse.buffer)
++    let netShareEnumResponse = try NetShareEnumResponse(data: rpcResponse.stub)
+ 
+     let shares = netShareEnumResponse.shareInfo1.shareInfo
+ 
+@@ -341,7 +341,7 @@ public class Session {
+ 
+     let (createResponse, queryDirectoryResponse) = try await send(createRequest, queryDirectoryRequest)
+ 
+-    var files: [FileDirectoryInformation] = queryDirectoryResponse.files()
++    var files: [FileDirectoryInformation] = try queryDirectoryResponse.files()
+ 
+     if NTStatus(createResponse.header.status) != .noMoreFiles {
+       repeat {
+@@ -360,7 +360,7 @@ public class Session {
+         )
+ 
+         let queryDirectoryResponse = try await send(queryDirectoryRequest)
+-        files.append(contentsOf: queryDirectoryResponse.files())
++        files.append(contentsOf: try queryDirectoryResponse.files())
+ 
+         if NTStatus(queryDirectoryResponse.header.status) == .noMoreFiles {
+           break
+@@ -693,7 +693,7 @@ public class Session {
+   private func send<Request: Message.Request>(_ message: Request) async throws -> Request.Response {
+     let packet = message.encoded()
+     let data = try await connection.send(sign(packet))
+-    let response = Request.Response(data: data)
++    let response = try Request.Response(data: data)
+     return response
+   }
+ 
+@@ -711,14 +711,14 @@ public class Session {
+       let alignment = Data(count: 8 - data.count % 8)
+       if index < count - 1 {
+         let body = data + alignment
+-        var header = Header(data: body[..<64])
++        var header = try Header(data: body[..<64])
+         let payload = data[64...]
+ 
+         header.nextCommand = UInt32(body.count)
+ 
+-        packet += sign(header.encoded() + payload + alignment)
++        packet += try sign(header.encoded() + payload + alignment)
+       } else {
+-        packet += sign(data + alignment)
++        packet += try sign(data + alignment)
+       }
+ 
+       index += 1
+@@ -735,20 +735,25 @@ public class Session {
+     repeat {
+       responses.append(Data(responseData[offset...]))
+ 
+-      header = reader.read()
++      header = try reader.read()
+ 
+       offset += Int(header.nextCommand)
+       reader.seek(to: offset)
+     } while header.nextCommand != 0
+ 
++    // RUMSKROT-HARDEN: a missing reply is an error, not an index trap.
++    guard responses.count >= count else {
++      throw ResponseDecodingError.missingResponse(expected: count, received: responses.count)
++    }
++
+     var iterator = 0
+-    func respond<R: Message.Request>(requestType: R.Type) -> R.Response {
+-      let response = R.Response(data: responses[iterator])
++    func respond<R: Message.Request>(requestType: R.Type) throws -> R.Response {
++      let response = try R.Response(data: responses[iterator])
+       iterator += 1
+       return response
+     }
+ 
+-    return (repeat respond(requestType: (each Request).self))
++    return (repeat try respond(requestType: (each Request).self))
+   }
+ #else
+   private func send<R1: Message.Request, R2: Message.Request>(_ m1: R1, _ m2: R2) async throws -> (R1.Response, R2.Response) {
+@@ -786,9 +791,9 @@ public class Session {
+   }
+ #endif
+ 
+-  private func sign(_ packet: Data) -> Data {
++  private func sign(_ packet: Data) throws -> Data {
+     if let signingKey, signingRequired, !isAnonymous {
+-      var header = Header(data: packet[..<64])
++      var header = try Header(data: packet[..<64])
+       let payload = packet[64...]
+ 
+       header.flags = header.flags.union(.signed)
+diff --git a/Sources/SMBClient/Transport.swift b/Sources/SMBClient/Transport.swift
+index dc0bc08..0202f1f 100644
+--- a/Sources/SMBClient/Transport.swift
++++ b/Sources/SMBClient/Transport.swift
+@@ -24,11 +24,11 @@ public struct DirectTCPPacket {
+     self.smb2Message = smb2Message
+   }
+ 
+-  public init(response: Data) {
++  public init(response: Data) throws {
+     let reader = ByteReader(response)
+     zero = 0
+ 
+-    let length = (reader.read() as UInt32).bigEndian
++    let length = (try reader.read() as UInt32).bigEndian
+ 
+     var data = Data(capacity: 3)
+     let byte1 = UInt8((length >> 16) & 0x000000FF)
+diff --git a/Sources/SMBClient/TreeAccessor.swift b/Sources/SMBClient/TreeAccessor.swift
+index a1bb5d9..e07a059 100644
+--- a/Sources/SMBClient/TreeAccessor.swift
++++ b/Sources/SMBClient/TreeAccessor.swift
+@@ -56,7 +56,7 @@ public class TreeAccessor {
+ 
+   public func fileInfo(path: String) async throws -> FileAllInformation {
+     let response = try await session().queryInfo(path: Pathname.normalize(path))
+-    return FileAllInformation(data: response.buffer)
++    return try FileAllInformation(data: response.buffer)
+   }
+ 
+   public func download(path: String) async throws -> Data {
+@@ -118,13 +118,15 @@ public class TreeAccessor {
+   public func availableSpace() async throws -> UInt64 {
+     let response = try await session().queryInfo(path: "", infoType: .fileSystem, fileInfoClass: .fileFsSizeInformation)
+ 
+-    let sizeInformation = FileFsSizeInformation(data: response.buffer)
++    let sizeInformation = try FileFsSizeInformation(data: response.buffer)
+     let availableAllocationUnits = sizeInformation.availableAllocationUnits
+     let sectorsPerAllocationUnit = sizeInformation.sectorsPerAllocationUnit
+     let bytesPerSector = sizeInformation.bytesPerSector
+ 
+-    let bytesPerAllocationUnit = UInt64(sectorsPerAllocationUnit * bytesPerSector)
+-    let availableSpaceBytes = availableAllocationUnits * bytesPerAllocationUnit
++    // RUMSKROT-HARDEN: server-reported factors; saturate rather than trap on overflow.
++    let bytesPerAllocationUnit = UInt64(sectorsPerAllocationUnit) * UInt64(bytesPerSector)
++    let (product, overflow) = availableAllocationUnits.multipliedReportingOverflow(by: bytesPerAllocationUnit)
++    let availableSpaceBytes = overflow ? UInt64.max : product
+ 
+     return availableSpaceBytes
+   }
+diff --git a/Tests/SMBClientTests/ConnectionTests.swift b/Tests/SMBClientTests/ConnectionTests.swift
+index 516c8f7..c46f32f 100644
+--- a/Tests/SMBClientTests/ConnectionTests.swift
++++ b/Tests/SMBClientTests/ConnectionTests.swift
+@@ -138,7 +138,7 @@ final class ConnectionTests: XCTestCase {
+     await fulfillment(of: [serverDone], timeout: 5)
+ 
+     XCTAssertEqual(responseData.count, successSmb2.count)
+-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
++    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
+   }
+ 
+   // MARK: - #1, #2: DirectTCP header fragmented across receives (PR #219)
+@@ -168,7 +168,7 @@ final class ConnectionTests: XCTestCase {
+     await fulfillment(of: [serverDone], timeout: 5)
+ 
+     XCTAssertEqual(responseData.count, successSmb2.count)
+-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
++    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
+   }
+ 
+   /// Header delivered exactly (4 bytes), then the body. Boundary case for
+@@ -194,7 +194,7 @@ final class ConnectionTests: XCTestCase {
+     await fulfillment(of: [serverDone], timeout: 5)
+ 
+     XCTAssertEqual(responseData.count, successSmb2.count)
+-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
++    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
+   }
+ 
+   // MARK: - #3: PENDING followed by buffer with < 4 bytes (PR #217)
+@@ -227,7 +227,7 @@ final class ConnectionTests: XCTestCase {
+     await fulfillment(of: [serverDone], timeout: 5)
+ 
+     XCTAssertEqual(responseData.count, successSmb2.count)
+-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
++    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
+   }
+ 
+   // MARK: - #4: PENDING followed by exactly 4 bytes (full header, zero body)
+@@ -259,7 +259,7 @@ final class ConnectionTests: XCTestCase {
+     await fulfillment(of: [serverDone], timeout: 5)
+ 
+     XCTAssertEqual(responseData.count, successSmb2.count)
+-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
++    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
+   }
+ 
+   // MARK: - #6: PENDING followed by exactly 4+length bytes (no trailing)
+@@ -288,7 +288,7 @@ final class ConnectionTests: XCTestCase {
+     await fulfillment(of: [serverDone], timeout: 5)
+ 
+     XCTAssertEqual(responseData.count, successSmb2.count)
+-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
++    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
+   }
+ 
+   // MARK: - #7: Large-payload multi-segment receive (PR #219)
+@@ -330,7 +330,7 @@ final class ConnectionTests: XCTestCase {
+     await fulfillment(of: [serverDone], timeout: 30)
+ 
+     XCTAssertEqual(responseData.count, body.count)
+-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
++    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
+   }
+ 
+   // MARK: - #9: Server EOF surfaces as ConnectionError.disconnected

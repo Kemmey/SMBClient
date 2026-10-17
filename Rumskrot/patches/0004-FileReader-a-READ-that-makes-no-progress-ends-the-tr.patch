@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kim Hansen <github@kimhansen.dk>
+Date: Sat, 17 Oct 2026 15:17:30 +0200
+Subject: [PATCH] FileReader: a READ that makes no progress ends the transfer;
+ progress stays finite
+
+A successful READ reply with no bytes before end-of-file used to make
+read(offset:length:) and both download loops spin forever; it is now a
+ResponseDecodingError. Progress for an empty file is 1.0 rather than
+0/0 = NaN, and never exceeds 1.0 when a server reports a smaller size
+than it then sends. A zero-length read returns empty data without
+asking the server.
+
+RUMSKROT-HARDEN 4/5
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013Swhv8UXni3MZr9Kcar7wJ
+---
+ Sources/SMBClient/FileReader.swift | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/Sources/SMBClient/FileReader.swift b/Sources/SMBClient/FileReader.swift
+index 31a9e75..6b0c03e 100644
+--- a/Sources/SMBClient/FileReader.swift
++++ b/Sources/SMBClient/FileReader.swift
+@@ -23,6 +23,8 @@ public class FileReader {
+   }
+ 
+   public func read(offset: UInt64, length: UInt32) async throws -> Data {
++    // RUMSKROT-HARDEN: nothing to read is not a stalled read.
++    guard length > 0 else { return Data() }
+     let readSize = min(length, session.maxReadSize)
+     let fileProxy = try await fileProxy()
+ 
+@@ -36,6 +38,7 @@ public class FileReader {
+         length: min(readSize, length - UInt32(truncatingIfNeeded: buffer.count))
+       )
+ 
++      try requireProgress(response)
+       buffer.append(response.buffer)
+     } while NTStatus(response.header.status) != .endOfFile && buffer.count < length && offset + UInt64(buffer.count) < fileProxy.size
+ 
+@@ -55,9 +58,10 @@ public class FileReader {
+         offset: offset
+       )
+ 
++      try requireProgress(response)
+       buffer.append(response.buffer)
+       offset = UInt64(buffer.count)
+-      progressHandler(Double(offset) / Double(fileProxy.size))
++      progressHandler(fraction(offset, of: fileProxy.size))
+     } while NTStatus(response.header.status) != .endOfFile && buffer.count < fileProxy.size
+ 
+     progressHandler(1.0)
+@@ -101,11 +105,12 @@ public class FileReader {
+         offset: offset
+       )
+ 
++      try requireProgress(response)
+       fileHandle.seekToEndOfFile()
+       fileHandle.write(response.buffer)
+       offset += UInt64(response.buffer.count)
+ 
+-      let progress = Double(offset) / Double(fileProxy.size)
++      let progress = fraction(offset, of: fileProxy.size)
+       progressHandler(progress)
+     } while NTStatus(response.header.status) != .endOfFile && offset < fileProxy.size
+ 
+@@ -136,3 +141,16 @@ public class FileReader {
+     return FileProxy(id: createResponse.fileId, size: createResponse.endOfFile)
+   }
+ }
++
++// RUMSKROT-HARDEN: a successful READ that returns no bytes before the end
++// of the file would otherwise repeat forever.
++private func requireProgress(_ response: Read.Response) throws {
++  guard response.buffer.isEmpty, NTStatus(response.header.status) != .endOfFile else { return }
++  throw ResponseDecodingError.invalidValue(field: "Read.dataLength", value: 0)
++}
++
++// RUMSKROT-HARDEN: an empty file is complete, not 0/0 = NaN.
++private func fraction(_ done: UInt64, of total: UInt64) -> Double {
++  guard total > 0 else { return 1.0 }
++  return min(1.0, Double(done) / Double(total))
++}
