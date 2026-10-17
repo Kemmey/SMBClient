@@ -162,6 +162,9 @@ public class Connection {
         let transportPacket: DirectTCPPacket
         do {
           transportPacket = try DirectTCPPacket(response: self.buffer)
+          // RUMSKROT-HARDEN: a Direct TCP length is 24 bits and an SMB2
+          // message is at least its 64-byte header.
+          try validateFrameLength(transportPacket.protocolLength)
         } catch {
           completion(.failure(error))
           return
@@ -180,6 +183,9 @@ public class Connection {
 
             var header: Header
             var response = Data()
+            // RUMSKROT-HARDEN: append the frame once, however many chained
+            // replies it holds; a server-chosen chain cannot multiply memory.
+            var appendedFrame = false
             do {
             repeat {
               header = try reader.read()
@@ -190,10 +196,14 @@ public class Connection {
                 .moreProcessingRequired,
                 .noMoreFiles,
                 .endOfFile:
-                response += data
+                if !appendedFrame {
+                  response += data
+                  appendedFrame = true
+                }
               case .pending:
                 if self.buffer.count >= 4 {
                   let transportPacket = try DirectTCPPacket(response: self.buffer)
+                  try validateFrameLength(transportPacket.protocolLength)
                   let length = Int(transportPacket.protocolLength)
 
                   if self.buffer.count < 4 + length {
@@ -228,6 +238,10 @@ public class Connection {
                 return
               }
 
+              // RUMSKROT-HARDEN: a chained reply starts past this header.
+              guard header.nextCommand == 0 || header.nextCommand >= 64 else {
+                throw ResponseDecodingError.invalidValue(field: "Header.nextCommand", value: UInt64(header.nextCommand))
+              }
               offset += Int(header.nextCommand)
               reader.seek(to: offset)
             } while header.nextCommand > 0
@@ -272,6 +286,13 @@ public class Connection {
     }
 
     completion(.success(()))
+  }
+}
+
+// RUMSKROT-HARDEN
+private func validateFrameLength(_ length: UInt32) throws {
+  guard length >= 64, length <= 0x00FF_FFFF else {
+    throw ResponseDecodingError.invalidValue(field: "DirectTCPPacket.length", value: UInt64(length))
   }
 }
 

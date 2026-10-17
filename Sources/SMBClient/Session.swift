@@ -737,12 +737,17 @@ public class Session {
 
       header = try reader.read()
 
+      // RUMSKROT-HARDEN: a chained reply must start past this header, and
+      // a server cannot answer more requests than were sent.
+      guard header.nextCommand == 0 || header.nextCommand >= 64, responses.count <= count else {
+        throw ResponseDecodingError.invalidValue(field: "Header.nextCommand", value: UInt64(header.nextCommand))
+      }
       offset += Int(header.nextCommand)
       reader.seek(to: offset)
     } while header.nextCommand != 0
 
-    // RUMSKROT-HARDEN: a missing reply is an error, not an index trap.
-    guard responses.count >= count else {
+    // RUMSKROT-HARDEN: nor fewer.
+    guard responses.count == count else {
       throw ResponseDecodingError.missingResponse(expected: count, received: responses.count)
     }
 
