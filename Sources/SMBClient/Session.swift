@@ -189,6 +189,15 @@ public class Session {
     let ioCtlResponse = try await session.netShareEnum(fileId: createResponse.fileId)
 
     let rpcResponse = try DCERPC.Response(data: ioCtlResponse.buffer)
+    // RUMSKROT-HARDEN: only a complete, single-fragment RPC response
+    // carries a NetShareEnum stub; a fault or a partial reply is refused
+    // rather than misparsed.
+    guard rpcResponse.commonFields.packetType == DCERPC.PacketType.response.rawValue else {
+      throw ResponseDecodingError.invalidValue(field: "DCERPC.packetType", value: UInt64(rpcResponse.commonFields.packetType))
+    }
+    guard rpcResponse.commonFields.flags.contains(.lastFragment) else {
+      throw ResponseDecodingError.missingResponse(expected: 2, received: 1)
+    }
     let netShareEnumResponse = try NetShareEnumResponse(data: rpcResponse.stub)
 
     let shares = netShareEnumResponse.shareInfo1.shareInfo
