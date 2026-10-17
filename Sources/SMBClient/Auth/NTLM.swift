@@ -104,6 +104,11 @@ public enum NTLM {
       version = try reader.read()
       targetName = try reader.read(from: Int(targetNameBufferOffset), count: Int(targetNameLen))
       targetInfo = try reader.read(from: Int(targetInfoBufferOffset), count: Int(targetInfoLen))
+      // RUMSKROT-HARDEN: the target info is echoed inside the NT challenge
+      // response (52 bytes of its own), whose length field is 16 bits.
+      guard targetInfo.count <= Int(UInt16.max) - 52 else {
+        throw ResponseDecodingError.invalidValue(field: "ChallengeMessage.targetInfoLen", value: UInt64(targetInfoLen))
+      }
 
       buffer = data
     }

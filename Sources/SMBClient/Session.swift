@@ -79,6 +79,16 @@ public class Session {
 
     let response = try await send(request)
 
+    // RUMSKROT-HARDEN: every read, write and listing is sized from these;
+    // zero would underflow the credit arithmetic or never make progress.
+    for (field, value) in [
+      ("maxTransactSize", response.maxTransactSize),
+      ("maxReadSize", response.maxReadSize),
+      ("maxWriteSize", response.maxWriteSize),
+    ] where value == 0 {
+      throw ResponseDecodingError.invalidValue(field: "Negotiate.\(field)", value: UInt64(value))
+    }
+
     signingRequired = response.securityMode.contains(.signingRequired) || (securityMode.contains(.signingRequired) && response.securityMode.contains(.signingEnabled))
 
     maxTransactSize = response.maxTransactSize
@@ -272,7 +282,13 @@ public class Session {
       length: readSize
     )
 
-    return try await send(request)
+    let response = try await send(request)
+    // RUMSKROT-HARDEN: a reply longer than the read asked for would
+    // underflow every caller's remaining-length arithmetic.
+    guard response.buffer.count <= Int(readSize) else {
+      throw ResponseDecodingError.invalidValue(field: "Read.dataLength", value: UInt64(response.buffer.count))
+    }
+    return response
   }
 
   @discardableResult
@@ -824,5 +840,7 @@ private class SequenceNumber<I: UnsignedInteger & FixedWidthInteger> {
 }
 
 private func creditSize(size: UInt32) -> UInt16 {
-  UInt16(truncatingIfNeeded: (size - 1) / 65536 + 1)
+  // RUMSKROT-HARDEN: a zero size still costs one credit, not an underflow.
+  guard size > 0 else { return 1 }
+  return UInt16(truncatingIfNeeded: (size - 1) / 65536 + 1)
 }
