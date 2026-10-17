@@ -84,19 +84,19 @@ public enum Read {
     public let reserved2: UInt32
     public let buffer: Data
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = reader.read()
-      structureSize = reader.read()
+      header = try reader.read()
+      structureSize = try reader.read()
 
       if header.status != 0xc0000011 {
-        dataOffset = reader.read()
-        reserved = reader.read()
-        dataLength = reader.read()
-        dataRemaining = reader.read()
-        reserved2 = reader.read()
-        buffer = reader.read(from: Int(dataOffset), count: Int(dataLength))
+        dataOffset = try reader.read()
+        reserved = try reader.read()
+        dataLength = try reader.read()
+        dataRemaining = try reader.read()
+        reserved2 = try reader.read()
+        buffer = try reader.read(from: Int(dataOffset), count: Int(dataLength))
       } else {
         dataOffset = 0
         reserved = 0

@@ -71,16 +71,16 @@ public enum SessionSetup {
     public let securityBufferLength: UInt16
     public let buffer: Data
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = reader.read()
+      header = try reader.read()
 
-      structureSize = reader.read()
-      sessionFlags = SessionFlags(rawValue: reader.read())
-      securityBufferOffset = reader.read()
-      securityBufferLength = reader.read()
-      buffer = reader.read(from: Int(securityBufferOffset), count: Int(securityBufferLength))
+      structureSize = try reader.read()
+      sessionFlags = try SessionFlags(rawValue: reader.read())
+      securityBufferOffset = try reader.read()
+      securityBufferLength = try reader.read()
+      buffer = try reader.read(from: Int(securityBufferOffset), count: Int(securityBufferLength))
     }
   }
 

@@ -3,14 +3,14 @@ import Foundation
 public struct FileEaInformation {
   public let eaSize: UInt32
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
-    eaSize = reader.read()
+    eaSize = try reader.read()
   }
 }
 
 extension ByteReader {
-  func read() -> FileEaInformation {
-    FileEaInformation(data: read(count: 4))
+  func read() throws -> FileEaInformation {
+    try FileEaInformation(data: read(count: 4))
   }
 }

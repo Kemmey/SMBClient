@@ -8,15 +8,16 @@ public struct FileFsVolumeInformation {
   public let reserved: UInt8
   public let volumeLabel: String
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
 
-    volumeCreationTime = reader.read()
-    volumeSerialNumber = reader.read()
-    volumeLabelLength = reader.read()
-    supportsObjects = reader.read() == 1
-    reserved = reader.read()
-    let volumeLabelData = reader.read(count: Int(volumeLabelLength))
+    volumeCreationTime = try reader.read()
+    volumeSerialNumber = try reader.read()
+    volumeLabelLength = try reader.read()
+    // RUMSKROT-HARDEN: a one-byte BOOLEAN; `read() == 1` inferred Int and consumed eight.
+    supportsObjects = try (reader.read() as UInt8) == 1
+    reserved = try reader.read()
+    let volumeLabelData = try reader.read(count: Int(volumeLabelLength))
     volumeLabel = String(data: volumeLabelData, encoding: .utf16LittleEndian) ?? volumeLabelData.hex
   }
 }

@@ -18,14 +18,14 @@ public struct FileModeInformation {
     public static let deleteOnClose = Mode(rawValue: 0x00001000)
   }
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
-    mode = Mode(rawValue: reader.read())
+    mode = try Mode(rawValue: reader.read())
   }
 }
 
 extension ByteReader {
-  func read() -> FileModeInformation {
-    FileModeInformation(data: read(count: 4))
+  func read() throws -> FileModeInformation {
+    try FileModeInformation(data: read(count: 4))
   }
 }

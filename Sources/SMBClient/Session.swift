@@ -113,7 +113,7 @@ public class Session {
     let response = try await send(request)
 
     if NTStatus(response.header.status) == .moreProcessingRequired {
-      let challengeMessage = NTLM.ChallengeMessage(data: response.buffer)
+      let challengeMessage = try NTLM.ChallengeMessage(data: response.buffer)
 
       let signingKey = Crypto.randomBytes(count: 16)
       let authenticateMessage = challengeMessage.authenticateMessage(
@@ -178,8 +178,8 @@ public class Session {
     try await session.bind(fileId: createResponse.fileId)
     let ioCtlResponse = try await session.netShareEnum(fileId: createResponse.fileId)
 
-    let rpcResponse = DCERPC.Response(data: ioCtlResponse.buffer)
-    let netShareEnumResponse = NetShareEnumResponse(data: rpcResponse.stub)
+    let rpcResponse = try DCERPC.Response(data: ioCtlResponse.buffer)
+    let netShareEnumResponse = try NetShareEnumResponse(data: rpcResponse.stub)
 
     let shares = netShareEnumResponse.shareInfo1.shareInfo
 
@@ -341,7 +341,7 @@ public class Session {
 
     let (createResponse, queryDirectoryResponse) = try await send(createRequest, queryDirectoryRequest)
 
-    var files: [FileDirectoryInformation] = queryDirectoryResponse.files()
+    var files: [FileDirectoryInformation] = try queryDirectoryResponse.files()
 
     if NTStatus(createResponse.header.status) != .noMoreFiles {
       repeat {
@@ -360,7 +360,7 @@ public class Session {
         )
 
         let queryDirectoryResponse = try await send(queryDirectoryRequest)
-        files.append(contentsOf: queryDirectoryResponse.files())
+        files.append(contentsOf: try queryDirectoryResponse.files())
 
         if NTStatus(queryDirectoryResponse.header.status) == .noMoreFiles {
           break
@@ -693,7 +693,7 @@ public class Session {
   private func send<Request: Message.Request>(_ message: Request) async throws -> Request.Response {
     let packet = message.encoded()
     let data = try await connection.send(sign(packet))
-    let response = Request.Response(data: data)
+    let response = try Request.Response(data: data)
     return response
   }
 
@@ -711,14 +711,14 @@ public class Session {
       let alignment = Data(count: 8 - data.count % 8)
       if index < count - 1 {
         let body = data + alignment
-        var header = Header(data: body[..<64])
+        var header = try Header(data: body[..<64])
         let payload = data[64...]
 
         header.nextCommand = UInt32(body.count)
 
-        packet += sign(header.encoded() + payload + alignment)
+        packet += try sign(header.encoded() + payload + alignment)
       } else {
-        packet += sign(data + alignment)
+        packet += try sign(data + alignment)
       }
 
       index += 1
@@ -735,20 +735,25 @@ public class Session {
     repeat {
       responses.append(Data(responseData[offset...]))
 
-      header = reader.read()
+      header = try reader.read()
 
       offset += Int(header.nextCommand)
       reader.seek(to: offset)
     } while header.nextCommand != 0
 
+    // RUMSKROT-HARDEN: a missing reply is an error, not an index trap.
+    guard responses.count >= count else {
+      throw ResponseDecodingError.missingResponse(expected: count, received: responses.count)
+    }
+
     var iterator = 0
-    func respond<R: Message.Request>(requestType: R.Type) -> R.Response {
-      let response = R.Response(data: responses[iterator])
+    func respond<R: Message.Request>(requestType: R.Type) throws -> R.Response {
+      let response = try R.Response(data: responses[iterator])
       iterator += 1
       return response
     }
 
-    return (repeat respond(requestType: (each Request).self))
+    return (repeat try respond(requestType: (each Request).self))
   }
 #else
   private func send<R1: Message.Request, R2: Message.Request>(_ m1: R1, _ m2: R2) async throws -> (R1.Response, R2.Response) {
@@ -786,9 +791,9 @@ public class Session {
   }
 #endif
 
-  private func sign(_ packet: Data) -> Data {
+  private func sign(_ packet: Data) throws -> Data {
     if let signingKey, signingRequired, !isAnonymous {
-      var header = Header(data: packet[..<64])
+      var header = try Header(data: packet[..<64])
       let payload = packet[64...]
 
       header.flags = header.flags.union(.signed)

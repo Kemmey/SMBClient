@@ -85,26 +85,26 @@ public enum Negotiate {
     public let negotiateContextOffset: UInt32
     public let securityBuffer: Data
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = reader.read()
+      header = try reader.read()
 
-      structureSize = reader.read()
-      securityMode = SecurityMode(rawValue: reader.read())
-      dialectRevision = reader.read()
-      negotiateContextCount = reader.read()
-      serverGuid = reader.read()
-      capabilities = Capabilities(rawValue: reader.read())
-      maxTransactSize = reader.read()
-      maxReadSize = reader.read()
-      maxWriteSize = reader.read()
-      systemTime = reader.read()
-      serverStartTime = reader.read()
-      securityBufferOffset = reader.read()
-      securityBufferLength = reader.read()
-      negotiateContextOffset = reader.read()
-      securityBuffer = reader.read(from: Int(securityBufferOffset), count: Int(securityBufferLength))
+      structureSize = try reader.read()
+      securityMode = try SecurityMode(rawValue: reader.read())
+      dialectRevision = try reader.read()
+      negotiateContextCount = try reader.read()
+      serverGuid = try reader.read()
+      capabilities = try Capabilities(rawValue: reader.read())
+      maxTransactSize = try reader.read()
+      maxReadSize = try reader.read()
+      maxWriteSize = try reader.read()
+      systemTime = try reader.read()
+      serverStartTime = try reader.read()
+      securityBufferOffset = try reader.read()
+      securityBufferLength = try reader.read()
+      negotiateContextOffset = try reader.read()
+      securityBuffer = try reader.read(from: Int(securityBufferOffset), count: Int(securityBufferLength))
     }
   }
 

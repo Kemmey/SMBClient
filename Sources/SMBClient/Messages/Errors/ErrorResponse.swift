@@ -6,13 +6,13 @@ public struct ErrorResponse: Error {
   public let errorContextCount: UInt8
   public let reserved: UInt8
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
 
-    header = reader.read()
-    structureSize = reader.read()
-    errorContextCount = reader.read()
-    reserved = reader.read()
+    header = try reader.read()
+    structureSize = try reader.read()
+    errorContextCount = try reader.read()
+    reserved = try reader.read()
   }
 }
 

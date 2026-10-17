@@ -159,7 +159,13 @@ public class Connection {
           break
         }
 
-        let transportPacket = DirectTCPPacket(response: self.buffer)
+        let transportPacket: DirectTCPPacket
+        do {
+          transportPacket = try DirectTCPPacket(response: self.buffer)
+        } catch {
+          completion(.failure(error))
+          return
+        }
         let length = Int(transportPacket.protocolLength)
         self.buffer = Data(transportPacket.smb2Message)
 
@@ -174,8 +180,9 @@ public class Connection {
 
             var header: Header
             var response = Data()
+            do {
             repeat {
-              header = reader.read()
+              header = try reader.read()
 
               switch NTStatus(header.status) {
               case
@@ -186,7 +193,7 @@ public class Connection {
                 response += data
               case .pending:
                 if self.buffer.count >= 4 {
-                  let transportPacket = DirectTCPPacket(response: self.buffer)
+                  let transportPacket = try DirectTCPPacket(response: self.buffer)
                   let length = Int(transportPacket.protocolLength)
 
                   if self.buffer.count < 4 + length {
@@ -198,7 +205,7 @@ public class Connection {
                   self.buffer = Data(self.buffer.suffix(from: 4 + length))
 
                   let reader = ByteReader(data)
-                  let header: Header = reader.read()
+                  let header: Header = try reader.read()
 
                   switch NTStatus(header.status) {
                   case
@@ -209,7 +216,7 @@ public class Connection {
                     response += data
                     break
                   default:
-                    completion(.failure(ErrorResponse(data: data)))
+                    completion(.failure(try ErrorResponse(data: data)))
                     return
                   }
                 } else {
@@ -217,13 +224,17 @@ public class Connection {
                   return
                 }
               default:
-                completion(.failure(ErrorResponse(data: Data(data[offset...]))))
+                completion(.failure(try ErrorResponse(data: Data(data[offset...]))))
                 return
               }
 
               offset += Int(header.nextCommand)
               reader.seek(to: offset)
             } while header.nextCommand > 0
+            } catch {
+              completion(.failure(error))
+              return
+            }
 
             completion(.success(response))
           case .failure(let error):

@@ -138,7 +138,7 @@ final class ConnectionTests: XCTestCase {
     await fulfillment(of: [serverDone], timeout: 5)
 
     XCTAssertEqual(responseData.count, successSmb2.count)
-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
+    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
   }
 
   // MARK: - #1, #2: DirectTCP header fragmented across receives (PR #219)
@@ -168,7 +168,7 @@ final class ConnectionTests: XCTestCase {
     await fulfillment(of: [serverDone], timeout: 5)
 
     XCTAssertEqual(responseData.count, successSmb2.count)
-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
+    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
   }
 
   /// Header delivered exactly (4 bytes), then the body. Boundary case for
@@ -194,7 +194,7 @@ final class ConnectionTests: XCTestCase {
     await fulfillment(of: [serverDone], timeout: 5)
 
     XCTAssertEqual(responseData.count, successSmb2.count)
-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
+    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
   }
 
   // MARK: - #3: PENDING followed by buffer with < 4 bytes (PR #217)
@@ -227,7 +227,7 @@ final class ConnectionTests: XCTestCase {
     await fulfillment(of: [serverDone], timeout: 5)
 
     XCTAssertEqual(responseData.count, successSmb2.count)
-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
+    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
   }
 
   // MARK: - #4: PENDING followed by exactly 4 bytes (full header, zero body)
@@ -259,7 +259,7 @@ final class ConnectionTests: XCTestCase {
     await fulfillment(of: [serverDone], timeout: 5)
 
     XCTAssertEqual(responseData.count, successSmb2.count)
-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
+    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
   }
 
   // MARK: - #6: PENDING followed by exactly 4+length bytes (no trailing)
@@ -288,7 +288,7 @@ final class ConnectionTests: XCTestCase {
     await fulfillment(of: [serverDone], timeout: 5)
 
     XCTAssertEqual(responseData.count, successSmb2.count)
-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
+    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
   }
 
   // MARK: - #7: Large-payload multi-segment receive (PR #219)
@@ -330,7 +330,7 @@ final class ConnectionTests: XCTestCase {
     await fulfillment(of: [serverDone], timeout: 30)
 
     XCTAssertEqual(responseData.count, body.count)
-    XCTAssertTrue(NTStatus(Header(data: responseData).status) == ErrorCode.success)
+    XCTAssertTrue(NTStatus(try Header(data: responseData).status) == ErrorCode.success)
   }
 
   // MARK: - #9: Server EOF surfaces as ConnectionError.disconnected

@@ -25,15 +25,15 @@ public struct FileBasicInformation: FileInformationClass {
     reserved = 0
   }
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
     
-    creationTime = reader.read()
-    lastAccessTime = reader.read()
-    lastWriteTime = reader.read()
-    changeTime = reader.read()
-    fileAttributes = FileAttributes(rawValue: reader.read())
-    reserved = reader.read()
+    creationTime = try reader.read()
+    lastAccessTime = try reader.read()
+    lastWriteTime = try reader.read()
+    changeTime = try reader.read()
+    fileAttributes = try FileAttributes(rawValue: reader.read())
+    reserved = try reader.read()
   }
 
   public func encoded() -> Data {
@@ -51,7 +51,7 @@ public struct FileBasicInformation: FileInformationClass {
 }
 
 extension ByteReader {
-  func read() -> FileBasicInformation {
-    FileBasicInformation(data: read(count: 40))
+  func read() throws -> FileBasicInformation {
+    try FileBasicInformation(data: read(count: 40))
   }
 }

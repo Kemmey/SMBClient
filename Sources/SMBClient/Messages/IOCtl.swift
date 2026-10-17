@@ -91,22 +91,22 @@ public enum IOCtl {
     public let reserved2: UInt32
     public let buffer: Data
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = reader.read()
+      header = try reader.read()
 
-      structureSize = reader.read()
-      reserved = reader.read()
-      ctlCode = reader.read()
-      fileId = reader.read(count: 16)
-      inputOffset = reader.read()
-      inputCount = reader.read()
-      outputOffset = reader.read()
-      outputCount = reader.read()
-      flags = Flags(rawValue: reader.read())
-      reserved2 = reader.read()
-      buffer = reader.read(count: Int(outputCount))
+      structureSize = try reader.read()
+      reserved = try reader.read()
+      ctlCode = try reader.read()
+      fileId = try reader.read(count: 16)
+      inputOffset = try reader.read()
+      inputCount = try reader.read()
+      outputOffset = try reader.read()
+      outputCount = try reader.read()
+      flags = try Flags(rawValue: reader.read())
+      reserved2 = try reader.read()
+      buffer = try reader.read(count: Int(outputCount))
     }
   }
 

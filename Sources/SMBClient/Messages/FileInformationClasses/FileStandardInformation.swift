@@ -8,20 +8,20 @@ public struct FileStandardInformation {
   public let directory: Bool
   public let reserved: UInt16
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
 
-    allocationSize = reader.read()
-    endOfFile = reader.read()
-    numberOfLinks = reader.read()
-    deletePending = reader.read()
-    directory = reader.read()
-    reserved = reader.read()
+    allocationSize = try reader.read()
+    endOfFile = try reader.read()
+    numberOfLinks = try reader.read()
+    deletePending = try reader.read()
+    directory = try reader.read()
+    reserved = try reader.read()
   }
 }
 
 extension ByteReader {
-  func read() -> FileStandardInformation {
-    FileStandardInformation(data: read(count: 24))
+  func read() throws -> FileStandardInformation {
+    try FileStandardInformation(data: read(count: 24))
   }
 }

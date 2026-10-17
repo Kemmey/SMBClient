@@ -3,14 +3,14 @@ import Foundation
 public struct FileAccessInformation {
   public let accessFlags: AccessMask
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
-    accessFlags = AccessMask(rawValue: reader.read())
+    accessFlags = try AccessMask(rawValue: reader.read())
   }
 }
 
 extension ByteReader {
-  func read() -> FileAccessInformation {
-    FileAccessInformation(data: read(count: 4))
+  func read() throws -> FileAccessInformation {
+    try FileAccessInformation(data: read(count: 4))
   }
 }

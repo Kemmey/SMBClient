@@ -44,12 +44,12 @@ public enum TreeDisconnect {
     public let structureSize: UInt16
     public let reserved: UInt16
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
       
-      header = reader.read()
-      structureSize = reader.read()
-      reserved = reader.read()
+      header = try reader.read()
+      structureSize = try reader.read()
+      reserved = try reader.read()
     }
   }
 }

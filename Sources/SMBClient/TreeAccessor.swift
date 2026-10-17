@@ -56,7 +56,7 @@ public class TreeAccessor {
 
   public func fileInfo(path: String) async throws -> FileAllInformation {
     let response = try await session().queryInfo(path: Pathname.normalize(path))
-    return FileAllInformation(data: response.buffer)
+    return try FileAllInformation(data: response.buffer)
   }
 
   public func download(path: String) async throws -> Data {
@@ -118,13 +118,15 @@ public class TreeAccessor {
   public func availableSpace() async throws -> UInt64 {
     let response = try await session().queryInfo(path: "", infoType: .fileSystem, fileInfoClass: .fileFsSizeInformation)
 
-    let sizeInformation = FileFsSizeInformation(data: response.buffer)
+    let sizeInformation = try FileFsSizeInformation(data: response.buffer)
     let availableAllocationUnits = sizeInformation.availableAllocationUnits
     let sectorsPerAllocationUnit = sizeInformation.sectorsPerAllocationUnit
     let bytesPerSector = sizeInformation.bytesPerSector
 
-    let bytesPerAllocationUnit = UInt64(sectorsPerAllocationUnit * bytesPerSector)
-    let availableSpaceBytes = availableAllocationUnits * bytesPerAllocationUnit
+    // RUMSKROT-HARDEN: server-reported factors; saturate rather than trap on overflow.
+    let bytesPerAllocationUnit = UInt64(sectorsPerAllocationUnit) * UInt64(bytesPerSector)
+    let (product, overflow) = availableAllocationUnits.multipliedReportingOverflow(by: bytesPerAllocationUnit)
+    let availableSpaceBytes = overflow ? UInt64.max : product
 
     return availableSpaceBytes
   }

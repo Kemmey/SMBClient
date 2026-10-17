@@ -76,26 +76,34 @@ public enum QueryDirectory {
     public let outputBufferLength: UInt32
     public let buffer: Data
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = reader.read()
+      header = try reader.read()
 
-      structureSize = reader.read()
-      outputBufferOffset = reader.read()
-      outputBufferLength = reader.read()
-      buffer = reader.read(from: Int(outputBufferOffset), count: Int(outputBufferLength))
+      structureSize = try reader.read()
+      outputBufferOffset = try reader.read()
+      outputBufferLength = try reader.read()
+      buffer = try reader.read(from: Int(outputBufferOffset), count: Int(outputBufferLength))
     }
 
-    public func files() -> [FileDirectoryInformation] {
+    public func files() throws -> [FileDirectoryInformation] {
       var files = [FileDirectoryInformation]()
       if outputBufferLength > 0 {
         var data = Data(buffer)
         repeat {
-          let fileInformation = FileDirectoryInformation(data: data)
+          let fileInformation = try FileDirectoryInformation(data: data)
           files.append(fileInformation)
-          data = Data(data[(fileInformation.nextEntryOffset)...])
-        } while files.last!.nextEntryOffset != 0
+          // RUMSKROT-HARDEN: the next entry must lie inside this buffer.
+          guard Int(fileInformation.nextEntryOffset) <= data.count else {
+            throw ResponseDecodingError.outOfBounds(
+              offset: Int(fileInformation.nextEntryOffset),
+              count: 0,
+              available: data.count
+            )
+          }
+          data = Data(data.dropFirst(Int(fileInformation.nextEntryOffset)))
+        } while files.last?.nextEntryOffset ?? 0 != 0
       }
 
       return files

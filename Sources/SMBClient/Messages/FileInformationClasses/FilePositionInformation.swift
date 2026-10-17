@@ -3,14 +3,14 @@ import Foundation
 public struct FilePositionInformation {
   public let currentByteOffset: UInt64
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
-    currentByteOffset = reader.read()
+    currentByteOffset = try reader.read()
   }
 }
 
 extension ByteReader {
-  func read() -> FilePositionInformation {
-    return FilePositionInformation(data: read(count: 8))
+  func read() throws -> FilePositionInformation {
+    return try FilePositionInformation(data: read(count: 8))
   }
 }

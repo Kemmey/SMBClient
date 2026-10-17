@@ -24,11 +24,11 @@ public struct DirectTCPPacket {
     self.smb2Message = smb2Message
   }
 
-  public init(response: Data) {
+  public init(response: Data) throws {
     let reader = ByteReader(response)
     zero = 0
 
-    let length = (reader.read() as UInt32).bigEndian
+    let length = (try reader.read() as UInt32).bigEndian
 
     var data = Data(capacity: 3)
     let byte1 = UInt8((length >> 16) & 0x000000FF)

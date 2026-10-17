@@ -80,17 +80,17 @@ public enum Write {
     public let writeChannelInfoOffset: UInt16
     public let writeChannelInfoLength: UInt16
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = reader.read()
+      header = try reader.read()
 
-      structureSize = reader.read()
-      reserved = reader.read()
-      count = reader.read()
-      remaining = reader.read()
-      writeChannelInfoOffset = reader.read()
-      writeChannelInfoLength = reader.read()
+      structureSize = try reader.read()
+      reserved = try reader.read()
+      count = try reader.read()
+      remaining = try reader.read()
+      writeChannelInfoOffset = try reader.read()
+      writeChannelInfoLength = try reader.read()
     }
   }
 

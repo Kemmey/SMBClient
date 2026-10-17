@@ -23,17 +23,17 @@ enum DCERPC {
       self.callID = callID
     }
 
-    init(data: Data) {
+    init(data: Data) throws {
       let reader = ByteReader(data)
 
-      version = reader.read()
-      minorVersion = reader.read()
-      packetType = reader.read()
-      flags = Flags(rawValue: reader.read())
-      dataRepresentation = reader.read()
-      fragLength = reader.read()
-      authLength = reader.read()
-      callID = reader.read()
+      version = try reader.read()
+      minorVersion = try reader.read()
+      packetType = try reader.read()
+      flags = try Flags(rawValue: reader.read())
+      dataRepresentation = try reader.read()
+      fragLength = try reader.read()
+      authLength = try reader.read()
+      callID = try reader.read()
     }
 
     func encoded() -> Data {
@@ -153,15 +153,15 @@ enum DCERPC {
     let reserved: UInt8
     let stub: Data
 
-    init(data: Data) {
+    init(data: Data) throws {
       let reader = ByteReader(data)
 
-      commonFields = reader.read()
-      allocHint = reader.read()
-      contextID = reader.read()
-      cancelCount = reader.read()
-      reserved = reader.read()
-      stub = reader.read(count: Int(commonFields.fragLength) - reader.offset)
+      commonFields = try reader.read()
+      allocHint = try reader.read()
+      contextID = try reader.read()
+      cancelCount = try reader.read()
+      reserved = try reader.read()
+      stub = try reader.read(count: Int(commonFields.fragLength) - reader.offset)
     }
   }
 
@@ -365,7 +365,7 @@ enum DCERPC {
 }
 
 extension ByteReader {
-  func read() -> DCERPC.CommonFields {
-    DCERPC.CommonFields(data: read(count: 16))
+  func read() throws -> DCERPC.CommonFields {
+    try DCERPC.CommonFields(data: read(count: 16))
   }
 }

@@ -59,20 +59,20 @@ public enum Close {
     public let endOfFile: UInt64
     public let fileAttributes: UInt32
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = reader.read()
-      structureSize = reader.read()
-      flags = reader.read()
-      reserved = reader.read()
-      creationTime = reader.read()
-      lastAccessTime = reader.read()
-      lastWriteTime = reader.read()
-      changeTime = reader.read()
-      allocationSize = reader.read()
-      endOfFile = reader.read()
-      fileAttributes = reader.read()
+      header = try reader.read()
+      structureSize = try reader.read()
+      flags = try reader.read()
+      reserved = try reader.read()
+      creationTime = try reader.read()
+      lastAccessTime = try reader.read()
+      lastWriteTime = try reader.read()
+      changeTime = try reader.read()
+      allocationSize = try reader.read()
+      endOfFile = try reader.read()
+      fileAttributes = try reader.read()
     }
   }
 

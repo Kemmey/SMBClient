@@ -59,17 +59,17 @@ public enum TreeConnect {
     public let capabilities: Capabilities
     public let maximalAccess: UInt32
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = reader.read()
+      header = try reader.read()
 
-      structureSize = reader.read()
-      shareType = reader.read()
-      reserved = reader.read()
-      shareFlags = ShareFlags(rawValue: reader.read())
-      capabilities = Capabilities(rawValue: reader.read())
-      maximalAccess = reader.read()
+      structureSize = try reader.read()
+      shareType = try reader.read()
+      reserved = try reader.read()
+      shareFlags = try ShareFlags(rawValue: reader.read())
+      capabilities = try Capabilities(rawValue: reader.read())
+      maximalAccess = try reader.read()
     }
   }
 

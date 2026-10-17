@@ -19,30 +19,30 @@ public struct FileIdBothDirectoryInformation {
   public let fileId: Data
   public let fileName: String
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
 
-    nextEntryOffset = reader.read()
-    fileIndex = reader.read()
-    creationTime = reader.read()
-    lastAccessTime = reader.read()
-    lastWriteTime = reader.read()
-    changeTime = reader.read()
-    endOfFile = reader.read()
-    allocationSize = reader.read()
-    fileAttributes = FileAttributes(rawValue: reader.read())
-    fileNameLength = reader.read()
-    eaSize = reader.read()
-    shortNameLength = reader.read()
-    reserved = reader.read()
+    nextEntryOffset = try reader.read()
+    fileIndex = try reader.read()
+    creationTime = try reader.read()
+    lastAccessTime = try reader.read()
+    lastWriteTime = try reader.read()
+    changeTime = try reader.read()
+    endOfFile = try reader.read()
+    allocationSize = try reader.read()
+    fileAttributes = try FileAttributes(rawValue: reader.read())
+    fileNameLength = try reader.read()
+    eaSize = try reader.read()
+    shortNameLength = try reader.read()
+    reserved = try reader.read()
 
-    let shortNameData = reader.read(count: 24)
+    let shortNameData = try reader.read(count: 24)
     shortName = String(data: shortNameData, encoding: .utf16LittleEndian) ?? shortNameData.hex
 
-    reserved2 = reader.read()
-    fileId = reader.read(count: 8)
+    reserved2 = try reader.read()
+    fileId = try reader.read(count: 8)
 
-    let fileNameData = reader.read(count: Int(fileNameLength))
+    let fileNameData = try reader.read(count: Int(fileNameLength))
     fileName = String(data: fileNameData, encoding: .utf16LittleEndian) ?? fileNameData.hex
   }
 }

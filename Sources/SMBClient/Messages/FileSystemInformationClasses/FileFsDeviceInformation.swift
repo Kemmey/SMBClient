@@ -30,10 +30,10 @@ public struct FileFsDeviceInformation {
     public static let portableDevice = Characteristics(rawValue: 0x00004000)
   }
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
 
-    deviceType = reader.read()
-    characteristics = Characteristics(rawValue: reader.read())
+    deviceType = try reader.read()
+    characteristics = try Characteristics(rawValue: reader.read())
   }
 }

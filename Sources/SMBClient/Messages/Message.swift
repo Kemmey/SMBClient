@@ -8,6 +8,6 @@ public enum Message {
 
   public protocol Response {
     var header: Header { get }
-    init(data: Data)
+    init(data: Data) throws
   }
 }

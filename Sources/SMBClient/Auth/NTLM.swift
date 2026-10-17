@@ -87,23 +87,23 @@ public enum NTLM {
 
     private let buffer: Data
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      signature = reader.read()
-      messageType = reader.read()
-      targetNameLen = reader.read()
-      targetNameMaxLen = reader.read()
-      targetNameBufferOffset = reader.read()
-      negotiateFlags = NegotiateFlags(rawValue: reader.read())
-      serverChallenge = reader.read()
-      reserved = reader.read()
-      targetInfoLen = reader.read()
-      targetInfoMaxLen = reader.read()
-      targetInfoBufferOffset = reader.read()
-      version = reader.read()
-      targetName = reader.read(from: Int(targetNameBufferOffset), count: Int(targetNameLen))
-      targetInfo = reader.read(from: Int(targetInfoBufferOffset), count: Int(targetInfoLen))
+      signature = try reader.read()
+      messageType = try reader.read()
+      targetNameLen = try reader.read()
+      targetNameMaxLen = try reader.read()
+      targetNameBufferOffset = try reader.read()
+      negotiateFlags = try NegotiateFlags(rawValue: reader.read())
+      serverChallenge = try reader.read()
+      reserved = try reader.read()
+      targetInfoLen = try reader.read()
+      targetInfoMaxLen = try reader.read()
+      targetInfoBufferOffset = try reader.read()
+      version = try reader.read()
+      targetName = try reader.read(from: Int(targetNameBufferOffset), count: Int(targetNameLen))
+      targetInfo = try reader.read(from: Int(targetInfoBufferOffset), count: Int(targetInfoLen))
 
       buffer = data
     }
@@ -437,12 +437,16 @@ struct AVPair {
     self.avValue = avValue
   }
 
-  init(data: Data) {
+  init(data: Data) throws {
     let reader = ByteReader(data)
     
-    avId = AVId(rawValue: reader.read())!
-    avLen = reader.read()
-    avValue = reader.read(count: Int(avLen))
+    let rawAVId: UInt16 = try reader.read()
+    guard let avId = AVId(rawValue: rawAVId) else {
+      throw ResponseDecodingError.invalidValue(field: "AVPair.avId", value: UInt64(rawAVId))
+    }
+    self.avId = avId
+    avLen = try reader.read()
+    avValue = try reader.read(count: Int(avLen))
   }
   
   func encoded() -> Data {

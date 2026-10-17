@@ -22,14 +22,14 @@ public struct FileAlignmentInformation {
     public static let fiveTwelve = AlignmentRequirement(rawValue: 0x000001FF)
   }
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
-    alignmentRequirement = AlignmentRequirement(rawValue: reader.read())
+    alignmentRequirement = try AlignmentRequirement(rawValue: reader.read())
   }
 }
 
 extension ByteReader {
-  func read() -> FileAlignmentInformation {
-    FileAlignmentInformation(data: read(count: 4))
+  func read() throws -> FileAlignmentInformation {
+    try FileAlignmentInformation(data: read(count: 4))
   }
 }

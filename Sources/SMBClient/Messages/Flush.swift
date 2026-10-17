@@ -51,12 +51,12 @@ public enum Flush {
     public let structureSize: UInt16
     public let reserved: UInt16
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = Header(data: data)
-      structureSize = reader.read()
-      reserved = reader.read()
+      header = try Header(data: data)
+      structureSize = try reader.read()
+      reserved = try reader.read()
     }
   }
 }

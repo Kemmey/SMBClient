@@ -7,7 +7,8 @@ extension Data {
   }
 
   func to<T>(type: T.Type) -> T {
-    return self.withUnsafeBytes { $0.load(as: T.self) }
+    // RUMSKROT-HARDEN: slices are rarely aligned for T; `load` requires it.
+    return self.withUnsafeBytes { $0.loadUnaligned(as: T.self) }
   }
 }
 

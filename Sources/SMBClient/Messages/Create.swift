@@ -114,28 +114,28 @@ public enum Create {
     public let createContextsLength: UInt32
     public let buffer: Data
 
-    public init(data: Data) {
+    public init(data: Data) throws {
       let reader = ByteReader(data)
 
-      header = reader.read()
+      header = try reader.read()
 
-      structureSize = reader.read()
-      oplockLevel = reader.read()
-      flags = Flags(rawValue: reader.read())
-      createAction = reader.read()
-      creationTime = reader.read()
-      lastAccessTime = reader.read()
-      lastWriteTime = reader.read()
-      changeTime = reader.read()
-      allocationSize = reader.read()
-      endOfFile = reader.read()
-      fileAttributes = FileAttributes(rawValue: reader.read())
-      reserved2 = reader.read()
-      fileId = reader.read(count: 16)
-      createContextsOffset = reader.read()
-      createContextsLength = reader.read()
+      structureSize = try reader.read()
+      oplockLevel = try reader.read()
+      flags = try Flags(rawValue: reader.read())
+      createAction = try reader.read()
+      creationTime = try reader.read()
+      lastAccessTime = try reader.read()
+      lastWriteTime = try reader.read()
+      changeTime = try reader.read()
+      allocationSize = try reader.read()
+      endOfFile = try reader.read()
+      fileAttributes = try FileAttributes(rawValue: reader.read())
+      reserved2 = try reader.read()
+      fileId = try reader.read(count: 16)
+      createContextsOffset = try reader.read()
+      createContextsLength = try reader.read()
       if createContextsOffset > 0 {
-        buffer = reader.read(from: Int(createContextsOffset), count: Int(createContextsLength))
+        buffer = try reader.read(from: Int(createContextsOffset), count: Int(createContextsLength))
       } else {
         buffer = Data()
       }

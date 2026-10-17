@@ -40,22 +40,22 @@ public struct Header {
     self.signature = Data(count: 16)
   }
 
-  init(data: Data) {
+  init(data: Data) throws {
     let reader = ByteReader(data)
 
-    protocolId = reader.read()
-    structureSize = reader.read()
-    creditCharge = reader.read()
-    status = reader.read()
-    command = reader.read()
-    creditRequestResponse = reader.read()
-    flags = Flags(rawValue: reader.read())
-    nextCommand = reader.read()
-    messageId = reader.read()
-    reserved = reader.read()
-    treeId = reader.read()
-    sessionId = reader.read()
-    signature = reader.read(count: 16)
+    protocolId = try reader.read()
+    structureSize = try reader.read()
+    creditCharge = try reader.read()
+    status = try reader.read()
+    command = try reader.read()
+    creditRequestResponse = try reader.read()
+    flags = try Flags(rawValue: reader.read())
+    nextCommand = try reader.read()
+    messageId = try reader.read()
+    reserved = try reader.read()
+    treeId = try reader.read()
+    sessionId = try reader.read()
+    signature = try reader.read(count: 16)
   }
 
   public func encoded() -> Data {
@@ -119,7 +119,7 @@ public struct Header {
 }
 
 extension ByteReader {
-  func read() -> Header {
-    Header(data: read(count: 64))
+  func read() throws -> Header {
+    try Header(data: read(count: 64))
   }
 }

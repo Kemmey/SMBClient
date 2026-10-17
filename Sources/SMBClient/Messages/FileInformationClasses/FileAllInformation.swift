@@ -11,17 +11,17 @@ public struct FileAllInformation {
   public let alignmentInformation: FileAlignmentInformation
   public let nameInformation: FileNameInformation
 
-  public init(data: Data) {
+  public init(data: Data) throws {
     let reader = ByteReader(data)
 
-    basicInformation = reader.read()
-    standardInformation = reader.read()
-    internalInformation = reader.read()
-    eaInformation = reader.read()
-    accessInformation = reader.read()
-    positionInformation = reader.read()
-    modeInformation = reader.read()
-    alignmentInformation = reader.read()
-    nameInformation = reader.read()
+    basicInformation = try reader.read()
+    standardInformation = try reader.read()
+    internalInformation = try reader.read()
+    eaInformation = try reader.read()
+    accessInformation = try reader.read()
+    positionInformation = try reader.read()
+    modeInformation = try reader.read()
+    alignmentInformation = try reader.read()
+    nameInformation = try reader.read()
   }
 }
