@@ -140,6 +140,12 @@ final class ScriptedServer: @unchecked Sendable {
   private let queue = DispatchQueue(label: "ScriptedServer")
   private var replies: [Data]
   private var connections = [NWConnection]()
+  private var received = [Data]()
+
+  /// Every request body received so far, in order.
+  var requests: [Data] {
+    queue.sync { received }
+  }
 
   init(replies: [Data]) throws {
     self.replies = replies
@@ -182,7 +188,8 @@ final class ScriptedServer: @unchecked Sendable {
       guard let self, let header else { return }
       let length = header.reduce(0) { $0 << 8 | Int($1) } & 0x00FF_FFFF
       receive(exactly: length, on: connection) { [weak self] body in
-        guard let self, body != nil else { return }
+        guard let self, let body else { return }
+        received.append(body)
         guard !replies.isEmpty else {
           connection.cancel()
           return
