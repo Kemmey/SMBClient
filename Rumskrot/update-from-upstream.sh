@@ -34,7 +34,7 @@
 set -euo pipefail
 
 UPSTREAM_URL="https://github.com/kishikawakatsumi/SMBClient.git"
-OFFLINE_TESTS="ResponseFuzzTests|MalformedServerTests|CryptoTests"
+OFFLINE_TESTS="ResponseFuzzTests|MalformedServerTests|ServerSideCopyTests|CryptoTests"
 TOOLING_PREFIX="Rumskrot tooling:"
 
 repo_root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)

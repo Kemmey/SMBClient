@@ -1,8 +1,9 @@
 # Rumskrot's SMBClient fork
 
 This is [kishikawakatsumi/SMBClient](https://github.com/kishikawakatsumi/SMBClient)
-with one small, ordered patch series on top. The series makes the client
-survive a broken or hostile server. Upstream's parsers read replies through
+with one small, ordered patch series on top. Patches 1–6 make the client
+survive a broken or hostile server. Patches 7–8 add server-side copy
+(RumskrotNavigator#195). Upstream's parsers read replies through
 an unchecked `ByteReader`, so a truncated or malformed reply traps the
 whole process. With the series applied, every such reply throws
 `ResponseDecodingError` instead.
@@ -22,8 +23,9 @@ The rules match the ones RumskrotArchiveKit uses for vendored code:
 2. **One patch per concern, written in upstream's style.** The patches use
    two-space indentation and the same naming, and their diffs are as small as
    the concern allows, so they rebase cleanly and could be offered upstream
-   unchanged. Each non-mechanical edit carries a `RUMSKROT-HARDEN:` comment,
-   and the test files carry `RUMSKROT-TESTS:`.
+   unchanged. Each non-mechanical edit carries a `RUMSKROT-HARDEN:` comment
+   (or `RUMSKROT-COPY:` for server-side copy), and the test files carry
+   `RUMSKROT-TESTS:`.
 3. **The license travels with the code.** SMBClient is MIT licensed
    (`LICENSE` at the root, Copyright (c) 2024 Kishikawa Katsumi). The
    patches are offered under the same license. Navigator ships that
@@ -47,6 +49,8 @@ which is why the default base is `upstream/main` and not the latest tag.
 | 4 | FileReader: a READ that makes no progress ends the transfer | A successful zero-byte READ before end of file used to loop forever and now throws. Progress is 1.0 for an empty file instead of NaN, and is capped at 1.0. |
 | 5 | listShares refuses an RPC fault or a multi-fragment reply | Upstream's `enumShareAll` decoded whatever came back as a NetShareEnum stub. A fault or a partial reply now throws. |
 | 6 | Tests | `ResponseFuzzTests`: every parser gets its well-formed fixture, every truncation of it, and 2,000 seeded corruptions. `MalformedServerTests`: a scripted localhost server sends malformed frames through the real `Connection` and `Session`. Neither suite needs the Samba container. |
+| 7 | Server-side copy: `FSCTL_SRV_REQUEST_RESUME_KEY` and `FSCTL_SRV_COPYCHUNK` | `Session.copyFile(from:to:destinationSession:limits:progressHandler:)` takes the source's resume key and copies in copy-chunk requests, so no file data crosses the network. Requests start within the limits Windows and Samba both advertise (16 chunks of 1 MiB); a server that answers `STATUS_INVALID_PARAMETER` with its own limits gets requests sized to those, once. The destination is created, never replaced, and deleted again on failure or cancellation. `SMBClient.copyFile(from:to:share:)` copies into another share through a second tree on the same session; Windows allows that, older Samba refuses it. `ErrorResponse.data` keeps the whole reply so those limits survive a non-success status. Upstream already had the IOCTL message and the control codes, but no caller. |
+| 8 | Tests: server-side copy | `ServerSideCopyTests`: the payloads byte for byte against MS-SMB2, and the whole exchange against the scripted server — limits adopted, a final refusal, an empty file, a server that writes nothing. `ScriptedServer` records the requests it receives. |
 
 ## Updating to a new upstream
 
@@ -81,8 +85,8 @@ change, its patch will conflict or come out empty. Drop it with
 `git am --skip`, then `--continue`. Then run
 `Rumskrot/update-from-upstream.sh --export` and commit the regenerated
 `patches/` as `Rumskrot tooling: regenerate patches`. Once upstream has
-merged all five hardening patches, Navigator can go back to pinning
-upstream directly, and this fork can be archived.
+merged the hardening patches and server-side copy, Navigator can go back
+to pinning upstream directly, and this fork can be archived.
 
 **To edit a patch**, change the code on the branch. Use a new commit, or
 amend before the branch is pushed. Then run `--export` and commit
