@@ -100,6 +100,41 @@ public class SMBClient {
     try await session.deleteDirectory(path: Pathname.normalize(path))
   }
 
+  // RUMSKROT-COPY: a copy the server makes by itself; see
+  // Session.copyFile(from:to:destinationSession:limits:progressHandler:).
+  public func copyFile(
+    from: String,
+    to: String,
+    progressHandler: (_ bytesCopied: UInt64, _ totalBytes: UInt64) -> Void = { _, _ in }
+  ) async throws {
+    try await session.copyFile(
+      from: Pathname.normalize(from),
+      to: Pathname.normalize(to.precomposedStringWithCanonicalMapping),
+      progressHandler: progressHandler
+    )
+  }
+
+  // RUMSKROT-COPY: the same, into another share of this server, through a
+  // second tree on this session. The server may refuse a copy between
+  // shares.
+  public func copyFile(
+    from: String,
+    to: String,
+    share: String,
+    progressHandler: (_ bytesCopied: UInt64, _ totalBytes: UInt64) -> Void = { _, _ in }
+  ) async throws {
+    // The accessor disconnects its tree when it goes, so it stays until
+    // the copy is done.
+    let accessor = treeAccessor(share: share)
+    defer { withExtendedLifetime(accessor) {} }
+    try await session.copyFile(
+      from: Pathname.normalize(from),
+      to: Pathname.normalize(to.precomposedStringWithCanonicalMapping),
+      destinationSession: try await accessor.session(),
+      progressHandler: progressHandler
+    )
+  }
+
   public func deleteFile(path: String) async throws {
     try await session.deleteFile(path: Pathname.normalize(path))
   }

@@ -5,9 +5,14 @@ public struct ErrorResponse: Error {
   public let structureSize: UInt16
   public let errorContextCount: UInt8
   public let reserved: UInt8
+  // RUMSKROT-COPY: the whole reply. Some failures still carry a command's
+  // own response body, e.g. FSCTL_SRV_COPYCHUNK's limits with
+  // STATUS_INVALID_PARAMETER.
+  public let data: Data
 
   public init(data: Data) throws {
     let reader = ByteReader(data)
+    self.data = data
 
     header = try reader.read()
     structureSize = try reader.read()

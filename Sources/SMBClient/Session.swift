@@ -659,6 +659,150 @@ public class Session {
     return try await send(request)
   }
 
+  // RUMSKROT-COPY: server-side copy (MS-SMB2 3.2.4.20.2). The source's
+  // resume key comes from this session; the copy-chunk requests go to
+  // `destinationSession`, which may be another tree on the same SMB
+  // session (TreeAccessor) when the destination is on another share.
+  // Whether a server copies between shares is up to the server: Windows
+  // does, older Samba refuses with STATUS_OBJECT_NAME_NOT_FOUND.
+  //
+  // The destination is created, never replaced; on failure or cancellation
+  // the partial destination is deleted, since nobody else's file can be
+  // there.
+  public func copyFile(
+    from source: String,
+    to destination: String,
+    destinationSession: Session? = nil,
+    limits: ServerSideCopy.Limits = .default,
+    progressHandler: (_ bytesCopied: UInt64, _ totalBytes: UInt64) -> Void = { _, _ in }
+  ) async throws {
+    let target = destinationSession ?? self
+
+    let sourceResponse = try await create(
+      desiredAccess: [.readData, .readAttributes, .synchronize],
+      fileAttributes: [],
+      shareAccess: [.read],
+      createDisposition: .open,
+      createOptions: [.nonDirectoryFile],
+      name: source
+    )
+    let sourceId = sourceResponse.fileId
+    let size = sourceResponse.endOfFile
+
+    var destinationId: Data?
+    do {
+      let resumeKey = try await requestResumeKey(fileId: sourceId)
+
+      let destinationResponse = try await target.create(
+        desiredAccess: [.readData, .writeData, .readAttributes, .writeAttributes, .synchronize],
+        fileAttributes: [.normal],
+        shareAccess: [],
+        createDisposition: .create,
+        createOptions: [.nonDirectoryFile],
+        name: destination
+      )
+      destinationId = destinationResponse.fileId
+
+      var limits = limits
+      var offset: UInt64 = 0
+      progressHandler(0, size)
+      while offset < size {
+        try Task.checkCancellation()
+        let chunks = limits.chunks(from: offset, size: size)
+        do {
+          let response = try await target.copyChunk(
+            fileId: destinationResponse.fileId,
+            sourceKey: resumeKey.key,
+            chunks: chunks
+          )
+          guard response.totalBytesWritten > 0 else {
+            throw ServerSideCopyError.noProgress(offset: offset)
+          }
+          offset += UInt64(response.totalBytesWritten)
+          progressHandler(min(offset, size), size)
+        } catch ServerSideCopyError.limitsRefused(let reported) {
+          // The server said what it accepts. Adopt it once; a request
+          // already within those limits that is still refused is final.
+          let requested = chunks.reduce(UInt64(0)) { $0 + UInt64($1.length) }
+          let fits = reported.isUsable
+            && chunks.count <= Int(reported.maxChunkCount)
+            && chunks.allSatisfy { $0.length <= reported.maxChunkSize }
+            && requested <= UInt64(reported.maxTotalSize)
+          guard reported.isUsable, !fits, reported != limits else {
+            throw ServerSideCopyError.limitsRefused(reported)
+          }
+          // A server's figure, bounded so a hostile one cannot make the
+          // client build an enormous request.
+          limits = ServerSideCopy.Limits(
+            maxChunkCount: min(reported.maxChunkCount, 256),
+            maxChunkSize: reported.maxChunkSize,
+            maxTotalSize: reported.maxTotalSize
+          )
+        }
+      }
+
+      try await target.close(fileId: destinationResponse.fileId)
+      destinationId = nil
+      try await close(fileId: sourceId)
+    } catch {
+      if let destinationId {
+        _ = try? await target.close(fileId: destinationId)
+        _ = try? await target.deleteFile(path: destination)
+      }
+      _ = try? await close(fileId: sourceId)
+      throw error
+    }
+  }
+
+  public func requestResumeKey(fileId: Data) async throws -> ServerSideCopy.ResumeKey {
+    let request = IOCtl.Request(
+      creditCharge: 1,
+      messageId: messageId.next(),
+      treeId: treeId,
+      sessionId: sessionId,
+      ctlCode: .srvRequestResumeKey,
+      fileId: fileId,
+      input: Data(),
+      output: Data()
+    )
+
+    let response = try await send(request)
+    return try ServerSideCopy.ResumeKey(data: response.buffer)
+  }
+
+  /// Throws ``ServerSideCopyError/limitsRefused(_:)`` when the server
+  /// answers STATUS_INVALID_PARAMETER with its own limits.
+  public func copyChunk(
+    fileId: Data,
+    sourceKey: Data,
+    chunks: [ServerSideCopy.Chunk],
+    writeOnly: Bool = false
+  ) async throws -> ServerSideCopy.CopyChunkResponse {
+    let input = ServerSideCopy.CopyChunkCopy(sourceKey: sourceKey, chunks: chunks)
+    let request = IOCtl.Request(
+      creditCharge: 1,
+      messageId: messageId.next(),
+      treeId: treeId,
+      sessionId: sessionId,
+      ctlCode: writeOnly ? .srvCopyChunkWrite : .srvCopyChunk,
+      fileId: fileId,
+      input: input.encoded(),
+      output: Data()
+    )
+
+    do {
+      let response = try await send(request)
+      return try ServerSideCopy.CopyChunkResponse(data: response.buffer)
+    } catch let error as ErrorResponse where NTStatus(error.header.status) == .invalidParameter {
+      guard let body = try? IOCtl.Response(data: error.data),
+            let reported = try? ServerSideCopy.CopyChunkResponse(data: body.buffer)
+      else {
+        throw error
+      }
+      throw ServerSideCopyError.limitsRefused(ServerSideCopy.Limits(reported))
+    }
+  }
+
   @discardableResult
   func bind(fileId: Data) async throws -> IOCtl.Response {
     let input = DCERPC.Bind(
