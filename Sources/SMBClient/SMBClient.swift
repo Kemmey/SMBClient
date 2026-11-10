@@ -92,8 +92,12 @@ public class SMBClient {
     try await move(from: Pathname.normalize(from), to: Pathname.normalize(to))
   }
 
-  public func move(from: String, to: String) async throws {
-    try await session.move(from: Pathname.normalize(from), to: Pathname.normalize(to.precomposedStringWithCanonicalMapping))
+  public func move(from: String, to: String, replaceIfExists: Bool = false) async throws {
+    try await session.move(
+      from: Pathname.normalize(from),
+      to: Pathname.normalize(to.precomposedStringWithCanonicalMapping),
+      replaceIfExists: replaceIfExists
+    )
   }
 
   public func deleteDirectory(path: String) async throws {

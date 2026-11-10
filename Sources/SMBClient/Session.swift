@@ -571,7 +571,9 @@ public class Session {
     _ = try await send(createRequest, setInfoRequest, closeRequest)
   }
 
-  public func move(from: String, to: String) async throws {
+  // RUMSKROT-HARDEN: `replaceIfExists` swaps a finished file over an existing
+  // one in one request, so a client never has to delete it first.
+  public func move(from: String, to: String, replaceIfExists: Bool = false) async throws {
     let createRequest = Create.Request(
       messageId: messageId.next(),
       treeId: treeId,
@@ -590,7 +592,10 @@ public class Session {
       sessionId: sessionId,
       fileId: temporaryUUID,
       infoType: .file,
-      fileInformation: FileRenameInformation(fileName: to.precomposedStringWithCanonicalMapping)
+      fileInformation: FileRenameInformation(
+        replaceIfExists: replaceIfExists,
+        fileName: to.precomposedStringWithCanonicalMapping
+      )
     )
     let closeRequest = Close.Request(
       headerFlags: [.relatedOperations],

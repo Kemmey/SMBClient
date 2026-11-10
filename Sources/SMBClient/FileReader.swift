@@ -88,7 +88,7 @@ public class FileReader {
     }
 
     defer {
-      fileHandle.closeFile()
+      try? fileHandle.close()
     }
 
     try await download(fileHandle: fileHandle, progressHandler: progressHandler)
@@ -106,8 +106,8 @@ public class FileReader {
       )
 
       try requireProgress(response)
-      fileHandle.seekToEndOfFile()
-      fileHandle.write(response.buffer)
+      // RUMSKROT-HARDEN: throws on a full disk instead of terminating.
+      try fileHandle.append(response.buffer)
       offset += UInt64(response.buffer.count)
 
       let progress = fraction(offset, of: fileProxy.size)

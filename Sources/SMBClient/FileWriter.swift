@@ -43,7 +43,9 @@ public class FileWriter {
 
     while true {
       let offset = UInt64(try fileHandle.offsetInFile())
-      let data = fileHandle.readData(ofLength: Int(session.maxWriteSize))
+      // RUMSKROT-HARDEN: throws on a read error instead of raising an
+      // Objective-C exception.
+      let data = try fileHandle.readChunk(upToCount: Int(session.maxWriteSize))
       if data.isEmpty { break }
 
       _ = try await session.write(
@@ -204,19 +206,37 @@ extension FileHandle {
     }
   }
 
+  // RUMSKROT-HARDEN: throwing reads and writes. The legacy readData(ofLength:),
+  // write(_:) and seekToEndOfFile() raise an Objective-C exception on a full
+  // disk or any other I/O error, which Swift cannot catch.
+  func readChunk(upToCount count: Int) throws -> Data {
+    guard #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) else {
+      throw CocoaError(.featureUnsupported)
+    }
+    return try read(upToCount: count) ?? Data()
+  }
+
+  func append(_ data: Data) throws {
+    guard #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) else {
+      throw CocoaError(.featureUnsupported)
+    }
+    try seekToEnd()
+    try write(contentsOf: data)
+  }
+
   func fileSize() throws -> UInt64 {
     let currentOffset: UInt64
     let fileSize: UInt64
 
-    if #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
-      currentOffset = try offset()
-      fileSize = try seekToEnd()
-    } else {
-      currentOffset = offsetInFile
-      fileSize = seekToEndOfFile()
+    // RUMSKROT-HARDEN: the throwing calls only. The legacy fallback raised
+    // an Objective-C exception on an I/O error.
+    guard #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) else {
+      throw CocoaError(.featureUnsupported)
     }
+    currentOffset = try offset()
+    fileSize = try seekToEnd()
 
-    seek(toFileOffset: currentOffset)
+    try seek(toOffset: currentOffset)
 
     return fileSize
   }
