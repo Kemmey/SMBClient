@@ -1,0 +1,236 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kim Hansen <github@kimhansen.dk>
+Date: Tue, 10 Nov 2026 15:08:57 +0100
+Subject: [PATCH] FileHandle: throwing reads and writes; move can replace an
+ existing file
+
+A download onto a full disk raised an Objective-C exception from the legacy
+FileHandle.write(_:)/seekToEndOfFile(), which Swift cannot catch, so the
+process terminated (RumskrotNavigator#244). Reads and writes now use the
+throwing calls. move(from:to:replaceIfExists:) sends FileRenameInformation
+with ReplaceIfExists, so a client can swap a finished file over an existing
+one instead of deleting it first (RumskrotNavigator#242).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LkMKuG84EaZ3Qi6prSGaER
+---
+ Sources/SMBClient/FileReader.swift            |  6 +-
+ Sources/SMBClient/FileWriter.swift            | 36 +++++++++---
+ Sources/SMBClient/SMBClient.swift             |  8 ++-
+ Sources/SMBClient/Session.swift               |  9 ++-
+ Sources/SMBClient/TreeAccessor.swift          |  8 ++-
+ .../Hardening/FileHandleErrorTests.swift      | 56 +++++++++++++++++++
+ 6 files changed, 106 insertions(+), 17 deletions(-)
+ create mode 100644 Tests/SMBClientTests/Hardening/FileHandleErrorTests.swift
+
+diff --git a/Sources/SMBClient/FileReader.swift b/Sources/SMBClient/FileReader.swift
+index 6b0c03e..b9e15fb 100644
+--- a/Sources/SMBClient/FileReader.swift
++++ b/Sources/SMBClient/FileReader.swift
+@@ -88,7 +88,7 @@ public class FileReader {
+     }
+ 
+     defer {
+-      fileHandle.closeFile()
++      try? fileHandle.close()
+     }
+ 
+     try await download(fileHandle: fileHandle, progressHandler: progressHandler)
+@@ -106,8 +106,8 @@ public class FileReader {
+       )
+ 
+       try requireProgress(response)
+-      fileHandle.seekToEndOfFile()
+-      fileHandle.write(response.buffer)
++      // RUMSKROT-HARDEN: throws on a full disk instead of terminating.
++      try fileHandle.append(response.buffer)
+       offset += UInt64(response.buffer.count)
+ 
+       let progress = fraction(offset, of: fileProxy.size)
+diff --git a/Sources/SMBClient/FileWriter.swift b/Sources/SMBClient/FileWriter.swift
+index a9a2d1c..c785811 100644
+--- a/Sources/SMBClient/FileWriter.swift
++++ b/Sources/SMBClient/FileWriter.swift
+@@ -43,7 +43,9 @@ public class FileWriter {
+ 
+     while true {
+       let offset = UInt64(try fileHandle.offsetInFile())
+-      let data = fileHandle.readData(ofLength: Int(session.maxWriteSize))
++      // RUMSKROT-HARDEN: throws on a read error instead of raising an
++      // Objective-C exception.
++      let data = try fileHandle.readChunk(upToCount: Int(session.maxWriteSize))
+       if data.isEmpty { break }
+ 
+       _ = try await session.write(
+@@ -204,19 +206,37 @@ extension FileHandle {
+     }
+   }
+ 
++  // RUMSKROT-HARDEN: throwing reads and writes. The legacy readData(ofLength:),
++  // write(_:) and seekToEndOfFile() raise an Objective-C exception on a full
++  // disk or any other I/O error, which Swift cannot catch.
++  func readChunk(upToCount count: Int) throws -> Data {
++    guard #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) else {
++      throw CocoaError(.featureUnsupported)
++    }
++    return try read(upToCount: count) ?? Data()
++  }
++
++  func append(_ data: Data) throws {
++    guard #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) else {
++      throw CocoaError(.featureUnsupported)
++    }
++    try seekToEnd()
++    try write(contentsOf: data)
++  }
++
+   func fileSize() throws -> UInt64 {
+     let currentOffset: UInt64
+     let fileSize: UInt64
+ 
+-    if #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+-      currentOffset = try offset()
+-      fileSize = try seekToEnd()
+-    } else {
+-      currentOffset = offsetInFile
+-      fileSize = seekToEndOfFile()
++    // RUMSKROT-HARDEN: the throwing calls only. The legacy fallback raised
++    // an Objective-C exception on an I/O error.
++    guard #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) else {
++      throw CocoaError(.featureUnsupported)
+     }
++    currentOffset = try offset()
++    fileSize = try seekToEnd()
+ 
+-    seek(toFileOffset: currentOffset)
++    try seek(toOffset: currentOffset)
+ 
+     return fileSize
+   }
+diff --git a/Sources/SMBClient/SMBClient.swift b/Sources/SMBClient/SMBClient.swift
+index 01fee34..de7555a 100644
+--- a/Sources/SMBClient/SMBClient.swift
++++ b/Sources/SMBClient/SMBClient.swift
+@@ -92,8 +92,12 @@ public class SMBClient {
+     try await move(from: Pathname.normalize(from), to: Pathname.normalize(to))
+   }
+ 
+-  public func move(from: String, to: String) async throws {
+-    try await session.move(from: Pathname.normalize(from), to: Pathname.normalize(to.precomposedStringWithCanonicalMapping))
++  public func move(from: String, to: String, replaceIfExists: Bool = false) async throws {
++    try await session.move(
++      from: Pathname.normalize(from),
++      to: Pathname.normalize(to.precomposedStringWithCanonicalMapping),
++      replaceIfExists: replaceIfExists
++    )
+   }
+ 
+   public func deleteDirectory(path: String) async throws {
+diff --git a/Sources/SMBClient/Session.swift b/Sources/SMBClient/Session.swift
+index 49c7578..492fbc9 100644
+--- a/Sources/SMBClient/Session.swift
++++ b/Sources/SMBClient/Session.swift
+@@ -571,7 +571,9 @@ public class Session {
+     _ = try await send(createRequest, setInfoRequest, closeRequest)
+   }
+ 
+-  public func move(from: String, to: String) async throws {
++  // RUMSKROT-HARDEN: `replaceIfExists` swaps a finished file over an existing
++  // one in one request, so a client never has to delete it first.
++  public func move(from: String, to: String, replaceIfExists: Bool = false) async throws {
+     let createRequest = Create.Request(
+       messageId: messageId.next(),
+       treeId: treeId,
+@@ -590,7 +592,10 @@ public class Session {
+       sessionId: sessionId,
+       fileId: temporaryUUID,
+       infoType: .file,
+-      fileInformation: FileRenameInformation(fileName: to.precomposedStringWithCanonicalMapping)
++      fileInformation: FileRenameInformation(
++        replaceIfExists: replaceIfExists,
++        fileName: to.precomposedStringWithCanonicalMapping
++      )
+     )
+     let closeRequest = Close.Request(
+       headerFlags: [.relatedOperations],
+diff --git a/Sources/SMBClient/TreeAccessor.swift b/Sources/SMBClient/TreeAccessor.swift
+index e07a059..16e3db8 100644
+--- a/Sources/SMBClient/TreeAccessor.swift
++++ b/Sources/SMBClient/TreeAccessor.swift
+@@ -29,8 +29,12 @@ public class TreeAccessor {
+     try await move(from: Pathname.normalize(from), to: Pathname.normalize(to))
+   }
+ 
+-  public func move(from: String, to: String) async throws {
+-    try await session().move(from: Pathname.normalize(from), to: Pathname.normalize(to.precomposedStringWithCanonicalMapping))
++  public func move(from: String, to: String, replaceIfExists: Bool = false) async throws {
++    try await session().move(
++      from: Pathname.normalize(from),
++      to: Pathname.normalize(to.precomposedStringWithCanonicalMapping),
++      replaceIfExists: replaceIfExists
++    )
+   }
+ 
+   public func deleteDirectory(path: String) async throws {
+diff --git a/Tests/SMBClientTests/Hardening/FileHandleErrorTests.swift b/Tests/SMBClientTests/Hardening/FileHandleErrorTests.swift
+new file mode 100644
+index 0000000..ed9a781
+--- /dev/null
++++ b/Tests/SMBClientTests/Hardening/FileHandleErrorTests.swift
+@@ -0,0 +1,56 @@
++import XCTest
++@testable import SMBClient
++
++// RUMSKROT-TESTS: a download whose local writes fail — a full disk, here a
++// handle that cannot write — throws instead of terminating the process with
++// an uncatchable Objective-C exception (RumskrotNavigator#244).
++final class FileHandleErrorTests: XCTestCase {
++  private var servers = [ScriptedServer]()
++
++  override func tearDown() {
++    servers.forEach { $0.stop() }
++    servers.removeAll()
++    super.tearDown()
++  }
++
++  func testDownloadIntoAnUnwritableHandleThrows() async throws {
++    let server = try ScriptedServer(replies: [
++      ResponseFixtures.frame(ResponseFixtures.negotiate()),
++      ResponseFixtures.frame(ResponseFixtures.create(contexts: Data())),
++      ResponseFixtures.frame(ResponseFixtures.read()),
++    ])
++    servers.append(server)
++    let port = try await server.start()
++    let session = Session(host: "127.0.0.1", port: port)
++    try await session.connect()
++    try await session.negotiate()
++
++    let url = FileManager.default.temporaryDirectory.appendingPathComponent("smb-\(UUID().uuidString).bin")
++    try Data().write(to: url)
++    defer { try? FileManager.default.removeItem(at: url) }
++    // Open for reading only: every write fails, as it does on a full disk.
++    let handle = try FileHandle(forReadingFrom: url)
++    defer { try? handle.close() }
++
++    let reader = FileReader(session: session, path: "file.txt")
++    do {
++      try await reader.download(fileHandle: handle)
++      XCTFail("expected the write to throw")
++    } catch is ResponseDecodingError {
++      XCTFail("the write failed, not the reply")
++    } catch {
++      // Thrown, not trapped.
++    }
++  }
++
++  func testUploadReadsWithTheThrowingCall() throws {
++    let url = FileManager.default.temporaryDirectory.appendingPathComponent("smb-\(UUID().uuidString).bin")
++    try Data("hello".utf8).write(to: url)
++    defer { try? FileManager.default.removeItem(at: url) }
++    let handle = try FileHandle(forReadingFrom: url)
++    defer { try? handle.close() }
++    XCTAssertEqual(try handle.readChunk(upToCount: 3), Data("hel".utf8))
++    XCTAssertEqual(try handle.readChunk(upToCount: 10), Data("lo".utf8))
++    XCTAssertEqual(try handle.readChunk(upToCount: 10), Data())
++  }
++}
